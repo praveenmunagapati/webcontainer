@@ -13,6 +13,7 @@ const state = {
   compiledBinary: null,
   isCompiling: false,
   isRunning: false,
+  projectDir: null,
 };
 
 // ---- DOM refs ----
@@ -297,6 +298,8 @@ async function initSDK() {
     logToConsole("Initializing local Wasmer SDK…", "system");
     await init();
 
+    state.projectDir = new Directory();
+
     dom.loaderStatus.textContent = "Loading local Clang compiler…";
     logToConsole("Loading local clang.webc (this might take a few seconds)…", "system");
     const response = await fetch("clang.webc", { cache: "no-store" });
@@ -347,12 +350,11 @@ async function compile() {
   logToConsole("Starting compilation…", "system");
 
   try {
-    const projectDir = new Directory();
-    await projectDir.writeFile("main.c", sourceCode);
+    await state.projectDir.writeFile("main.c", sourceCode);
 
     const instance = await state.clang.entrypoint.run({
-      args: ["/project/main.c", "-o", "/project/main.wasm"],
-      mount: { "/project": projectDir },
+      args: ["-O1", "-fno-spell-checking", "/project/main.c", "-o", "/project/main.wasm"],
+      mount: { "/project": state.projectDir },
     });
 
     const output = await instance.wait();
@@ -370,7 +372,7 @@ async function compile() {
     }
 
     if (output.ok) {
-      const wasmBinary = await projectDir.readFile("main.wasm");
+      const wasmBinary = await state.projectDir.readFile("main.wasm");
       state.compiledBinary = wasmBinary;
 
       completeProgressBar(true);
@@ -412,11 +414,6 @@ async function runWasm() {
 
   try {
     const module = await WebAssembly.compile(state.compiledBinary);
-
-    // Use Wasmer's runtime to run the compiled wasm properly
-    // The compiled binary from clang is a WASI binary — run it through Wasmer
-    const runDir = new Directory();
-    await runDir.writeFile("main.wasm", state.compiledBinary);
 
     const pkg = await Wasmer.fromFile(state.compiledBinary);
     const instance = await pkg.entrypoint.run();
