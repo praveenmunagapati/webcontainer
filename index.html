@@ -171,10 +171,36 @@
               </svg>
               <span>Program Output</span>
             </button>
+            <button class="panel-tab" data-tab="algorithm" id="tab-algorithm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="8" y1="6" x2="21" y2="6"></line>
+                <line x1="8" y1="12" x2="21" y2="12"></line>
+                <line x1="8" y1="18" x2="21" y2="18"></line>
+                <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                <line x1="3" y1="18" x2="3.01" y2="18"></line>
+              </svg>
+              <span>Algorithm</span>
+            </button>
+            <button class="panel-tab" data-tab="flowchart" id="tab-flowchart">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="9" rx="1"></rect>
+                <rect x="14" y="12" width="7" height="9" rx="1"></rect>
+                <path d="M10 7.5h4v9"></path>
+                <polygon points="12 16.5 14 16.5 14 14.5"></polygon>
+              </svg>
+              <span>Flowchart</span>
+            </button>
           </div>
         </div>
         <div id="console-output" class="output-content active"></div>
         <div id="program-output" class="output-content"></div>
+        <div id="algorithm-output" class="output-content algorithm-container">
+          <div class="tab-placeholder">Compile your code to generate a step-by-step algorithm.</div>
+        </div>
+        <div id="flowchart-output" class="output-content flowchart-container">
+          <div class="tab-placeholder">Compile your code to render a control flow diagram.</div>
+        </div>
       </section>
     </main>
 

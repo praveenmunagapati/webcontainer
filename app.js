@@ -46,6 +46,10 @@ const dom = {
   modalClose:     $("#modal-close"),
   tabConsole:     $("#tab-console"),
   tabOutput:      $("#tab-output"),
+  tabAlgorithm:   $("#tab-algorithm"),
+  tabFlowchart:   $("#tab-flowchart"),
+  algorithmOutput:$("#algorithm-output"),
+  flowchartOutput:$("#flowchart-output"),
   selectLanguage: $("#select-language"),
 };
 
@@ -488,9 +492,38 @@ async function compile() {
       dom.statusWasm.textContent = `WASM: ${wasmBinary.byteLength.toLocaleString()} bytes`;
       dom.statusWasm.style.display = "inline-flex";
       setButtonStates(false, true);
-    } else {
-      completeProgressBar(false);
-      setStatus("Error", "error");
+
+      // --- GENERATE FLOWCHART & ALGORITHM ---
+      try {
+        logToConsole("[Analysis] Generating flowchart and step-by-step algorithm...", "info");
+        const analysisStart = performance.now();
+        const analysis = parseCodeToFlow(sourceCode, state.language);
+        
+        // Render Algorithm
+        dom.algorithmOutput.innerHTML = `
+          <div class="algorithm-container">
+            <h3 style="margin-bottom:16px; font-size:15px; font-weight:600; color:var(--text-primary);">Algorithm Steps for main.${state.language === 'cpp' ? 'cpp' : 'c'}</h3>
+            <ol class="algorithm-list">
+              ${analysis.steps.map(step => `<li class="algorithm-step">${escapeHtml(step)}</li>`).join("")}
+            </ol>
+          </div>
+        `;
+        
+        // Render Flowchart
+        const svgHtml = renderFlowchartToSvg(analysis);
+        dom.flowchartOutput.innerHTML = `
+          <div class="flowchart-container">
+            ${svgHtml}
+          </div>
+        `;
+        logToConsole(`[Analysis] Flowchart and algorithm generated in ${(performance.now() - analysisStart).toFixed(1)}ms`, "success");
+      } catch (analErr) {
+        console.error("Analysis generation error:", analErr);
+        logToConsole(`[Analysis] Failed to generate: ${analErr.message}`, "warning");
+      }
+
+      completeProgressBar(true);
+      setStatus("Compiled", "success");
       logToConsole(`Error: Compilation process returned exit status code ${output.code}`, "error");
       setButtonStates(false, false);
     }
@@ -595,8 +628,13 @@ async function compileAndRun() {
 function switchTab(tab) {
   dom.tabConsole.classList.toggle("active", tab === "console");
   dom.tabOutput.classList.toggle("active",  tab === "output");
+  dom.tabAlgorithm.classList.toggle("active", tab === "algorithm");
+  dom.tabFlowchart.classList.toggle("active", tab === "flowchart");
+  
   dom.consoleOutput.classList.toggle("active", tab === "console");
   dom.programOutput.classList.toggle("active", tab === "output");
+  dom.algorithmOutput.classList.toggle("active", tab === "algorithm");
+  dom.flowchartOutput.classList.toggle("active", tab === "flowchart");
 }
 
 function setupEditor(callback) {
@@ -766,11 +804,15 @@ function bindEvents() {
   dom.btnClearConsole.addEventListener("click", () => {
     dom.consoleOutput.innerHTML = "";
     dom.programOutput.innerHTML = "";
+    dom.algorithmOutput.innerHTML = `<div class="tab-placeholder">Compile your code to generate a step-by-step algorithm.</div>`;
+    dom.flowchartOutput.innerHTML = `<div class="tab-placeholder">Compile your code to render a control flow diagram.</div>`;
     logToConsole("Console cleared.", "info");
   });
 
   dom.tabConsole.addEventListener("click", () => switchTab("console"));
   dom.tabOutput.addEventListener("click",  () => switchTab("output"));
+  dom.tabAlgorithm.addEventListener("click", () => switchTab("algorithm"));
+  dom.tabFlowchart.addEventListener("click", () => switchTab("flowchart"));
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
@@ -803,4 +845,286 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", boot);
 } else {
   boot();
+}
+
+// ---- Flowchart and Algorithm Helpers ----
+function parseCodeToFlow(code, language) {
+  let cleanCode = code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*/g, "");
+
+  let lines = cleanCode.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+
+  const steps = [];
+  const nodes = [];
+  const links = [];
+
+  nodes.push({ id: "start", type: "start", text: "Start" });
+  steps.push("Start of program execution.");
+
+  let lastNodeId = "start";
+  let ifStack = [];
+  let loopStack = [];
+  let nodeIdCounter = 1;
+
+  function addNode(type, text, rawLine = "") {
+    const id = `node_${nodeIdCounter++}`;
+    nodes.push({ id, type, text, rawLine });
+    return id;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.match(/^(int|void|float|double|char)\s+main\s*\(/) || line === "{" || line === "}") {
+      if (line === "}" && loopStack.length > 0) {
+        const loop = loopStack.pop();
+        links.push({ from: lastNodeId, to: loop.loopNodeId, label: "repeat" });
+        lastNodeId = loop.loopNodeId;
+        steps.push("Loop iterations completed. Return to check loop condition.");
+      }
+      continue;
+    }
+
+    if (line.startsWith("return") || line.startsWith("exit")) {
+      const text = line.replace(";", "").trim();
+      const id = addNode("end", text, line);
+      links.push({ from: lastNodeId, to: id });
+      steps.push(`Terminate program execution and exit (${text}).`);
+      lastNodeId = id;
+      continue;
+    }
+
+    const ifMatch = line.match(/^if\s*\((.*)\)/);
+    if (ifMatch) {
+      const cond = ifMatch[1].trim();
+      const id = addNode("decision", `Is ${cond}?`, line);
+      links.push({ from: lastNodeId, to: id });
+      steps.push(`Evaluate branch condition: Is "${cond}"?`);
+      
+      ifStack.push({
+        decisionNodeId: id,
+        prevNodeId: lastNodeId,
+        yesBranchNodes: [id],
+        noBranchNodes: [],
+        currentBranch: "yes"
+      });
+      lastNodeId = id;
+      continue;
+    }
+
+    if (line.startsWith("else")) {
+      if (ifStack.length > 0) {
+        const top = ifStack[ifStack.length - 1];
+        top.currentBranch = "no";
+        lastNodeId = top.decisionNodeId;
+      }
+      continue;
+    }
+
+    const whileMatch = line.match(/^while\s*\((.*)\)/);
+    const forMatch = line.match(/^for\s*\((.*)\)/);
+    if (whileMatch || forMatch) {
+      const cond = whileMatch ? whileMatch[1].trim() : forMatch[1].split(";")[1]?.trim() || "loop condition";
+      const id = addNode("decision", `Loop: ${cond}`, line);
+      links.push({ from: lastNodeId, to: id });
+      steps.push(`Check loop condition: ${cond}`);
+      
+      loopStack.push({
+        loopNodeId: id,
+        entryNodeId: lastNodeId
+      });
+      lastNodeId = id;
+      continue;
+    }
+
+    const isIO = line.includes("printf") || line.includes("scanf") || line.includes("cout") || line.includes("cin");
+    if (isIO) {
+      let desc = "";
+      if (line.includes("printf") || line.includes("cout")) {
+        desc = "Output: Print text";
+      } else {
+        desc = "Input: Read variable";
+      }
+      const text = line.replace(";", "").replace("std::", "").trim();
+      const id = addNode("io", text, line);
+      links.push({ from: lastNodeId, to: id });
+      steps.push(`${desc} ("${text}").`);
+      
+      if (ifStack.length > 0) {
+        const top = ifStack[ifStack.length - 1];
+        if (top.currentBranch === "yes") top.yesBranchNodes.push(id);
+        else top.noBranchNodes.push(id);
+      }
+      lastNodeId = id;
+      continue;
+    }
+
+    if (line.includes("=") || line.match(/^(int|float|double|char|bool|auto|std::vector|vector)\s+\w+/)) {
+      const text = line.replace(";", "").replace("std::", "").trim();
+      const id = addNode("process", text, line);
+      links.push({ from: lastNodeId, to: id });
+      steps.push(`Process statement: "${text}".`);
+      
+      if (ifStack.length > 0) {
+        const top = ifStack[ifStack.length - 1];
+        if (top.currentBranch === "yes") top.yesBranchNodes.push(id);
+        else top.noBranchNodes.push(id);
+      }
+      lastNodeId = id;
+      continue;
+    }
+  }
+
+  if (ifStack.length > 0) {
+    const cond = ifStack.pop();
+    const mergeId = addNode("process", "Merge Path");
+    
+    if (cond.yesBranchNodes.length > 0) {
+      links.push({ from: cond.yesBranchNodes[cond.yesBranchNodes.length - 1], to: mergeId });
+    } else {
+      links.push({ from: cond.decisionNodeId, to: mergeId, label: "yes" });
+    }
+    
+    if (cond.noBranchNodes.length > 0) {
+      links.push({ from: cond.noBranchNodes[cond.noBranchNodes.length - 1], to: mergeId });
+    } else {
+      links.push({ from: cond.decisionNodeId, to: mergeId, label: "no" });
+    }
+    
+    lastNodeId = mergeId;
+    steps.push("Branch execution paths merge back to main line.");
+  }
+
+  if (lastNodeId !== "start" && !nodes.find(n => n.id === lastNodeId && n.type === "end")) {
+    const endId = addNode("end", "End");
+    links.push({ from: lastNodeId, to: endId });
+    steps.push("End of program execution.");
+  }
+
+  return { nodes, links, steps };
+}
+
+function computeLayout(nodes, links) {
+  let currentY = 40;
+  const positions = {};
+  
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    let x = 200;
+    let y = currentY;
+    
+    positions[node.id] = { x, y };
+    
+    if (node.type === "decision") {
+      currentY += 100;
+    } else {
+      currentY += 80;
+    }
+  }
+  
+  links.forEach(link => {
+    const fromNode = nodes.find(n => n.id === link.from);
+    if (fromNode) {
+      if (fromNode.type === "decision") {
+        if (link.label === "yes" || !link.label) {
+          positions[link.to].x = 100;
+        } else if (link.label === "no") {
+          positions[link.to].x = 300;
+        }
+      }
+    }
+  });
+  
+  nodes.forEach(node => {
+    if (node.text === "Merge Path") {
+      positions[node.id].x = 200;
+    }
+  });
+  
+  return positions;
+}
+
+function renderFlowchartToSvg(analysis) {
+  const { nodes, links } = analysis;
+  const positions = computeLayout(nodes, links);
+  
+  let maxY = 100;
+  Object.values(positions).forEach(pos => {
+    if (pos.y > maxY) maxY = pos.y;
+  });
+  const svgHeight = maxY + 80;
+  
+  let html = `<svg class="flowchart-svg" width="400" height="${svgHeight}" viewBox="0 0 400 ${svgHeight}">`;
+  
+  html += `
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-marker" />
+      </marker>
+    </defs>
+  `;
+  
+  links.forEach(link => {
+    const fromPos = positions[link.from];
+    const toPos = positions[link.to];
+    
+    if (fromPos && toPos) {
+      let startX = fromPos.x;
+      let startY = fromPos.y;
+      let endX = toPos.x;
+      let endY = toPos.y;
+      
+      let d = "";
+      if (startX === endX) {
+        d = `M ${startX} ${startY + 20} L ${endX} ${endY - 20}`;
+      } else {
+        const midY = (startY + endY) / 2;
+        d = `M ${startX} ${startY + 20} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY - 20}`;
+      }
+      
+      html += `<path d="${d}" class="flow-line" />`;
+      
+      if (link.label) {
+        const labelX = (startX + endX) / 2;
+        const labelY = (startY + endY) / 2 - 8;
+        html += `<text class="flow-line-label" x="${labelX}" y="${labelY}">${link.label}</text>`;
+      }
+    }
+  });
+  
+  nodes.forEach(node => {
+    const pos = positions[node.id];
+    if (!pos) return;
+    
+    const x = pos.x;
+    const y = pos.y;
+    
+    if (node.type === "start" || node.type === "end") {
+      html += `<ellipse cx="${x}" cy="${y}" rx="40" ry="20" class="flow-node flow-${node.type}" />`;
+    } else if (node.type === "decision") {
+      const points = `${x},${y-30} ${x+65},${y} ${x},${y+30} ${x-65},${y}`;
+      html += `<polygon points="${points}" class="flow-node flow-decision" />`;
+    } else if (node.type === "io") {
+      const points = `${x-45},${y-20} ${x+55},${y-20} ${x+45},${y+20} ${x-55},${y+20}`;
+      html += `<polygon points="${points}" class="flow-node flow-io" />`;
+    } else {
+      if (node.text === "Merge Path") {
+        html += `<circle cx="${x}" cy="${y}" r="6" class="flow-node flow-process" style="fill:var(--text-muted); stroke:none;" />`;
+        return;
+      }
+      html += `<rect x="${x-60}" y="${y-20}" width="120" height="40" rx="6" ry="6" class="flow-node flow-process" />`;
+    }
+    
+    if (node.text !== "Merge Path") {
+      let displayTxt = node.text;
+      if (displayTxt.length > 15) {
+        displayTxt = displayTxt.substring(0, 13) + "...";
+      }
+      html += `<text x="${x}" y="${y}" class="flow-node-text">${displayTxt}</text>`;
+    }
+  });
+  
+  html += `</svg>`;
+  return html;
 }
