@@ -473,41 +473,42 @@ function switchTab(tab) {
   dom.programOutput.classList.toggle("active", tab === "output");
 }
 
-// ---- Editor Setup ----
-function setupEditor() {
-  state.editor = CodeMirror(dom.editorContainer, {
-    value: EXAMPLES[0].code,
-    mode: "text/x-csrc",
-    theme: "material-darker",
-    lineNumbers: true,
-    matchBrackets: true,
-    autoCloseBrackets: true,
-    styleActiveLine: true,
-    tabSize: 4,
-    indentUnit: 4,
-    indentWithTabs: false,
-    lineWrapping: false,
-  });
+function setupEditor(callback) {
+  require.config({ paths: { vs: './node_modules/monaco-editor/min/vs' } });
+  require(['vs/editor/editor.main'], function () {
+    state.editor = monaco.editor.create(dom.editorContainer, {
+      value: EXAMPLES[0].code,
+      language: 'c',
+      theme: 'vs-dark',
+      automaticLayout: true,
+      fontSize: 14,
+      fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, monospace',
+      minimap: { enabled: true },
+      lineNumbers: 'on',
+      tabSize: 4,
+      insertSpaces: true,
+      wordWrap: 'off'
+    });
 
-  // Track cursor position
-  state.editor.on("cursorActivity", () => {
-    const { line, ch } = state.editor.getCursor();
-    dom.statusCursor.textContent = `Ln ${line + 1}, Col ${ch + 1}`;
-  });
+    // Track cursor position
+    state.editor.onDidChangeCursorPosition((e) => {
+      const { lineNumber, column } = e.position;
+      dom.statusCursor.textContent = `Ln ${lineNumber}, Col ${column}`;
+    });
 
-  // Track unsaved changes
-  let savedValue = state.editor.getValue();
-  state.editor.on("change", () => {
-    const changed = state.editor.getValue() !== savedValue;
-    dom.unsavedDot.style.display = changed ? "inline-block" : "none";
-  });
+    // Track unsaved changes
+    let savedValue = state.editor.getValue();
+    state.editor.onDidChangeModelContent(() => {
+      const changed = state.editor.getValue() !== savedValue;
+      dom.unsavedDot.style.display = changed ? "inline-block" : "none";
+    });
 
-  // Keyboard shortcuts
-  state.editor.setOption("extraKeys", {
-    "Ctrl-B": () => compile(),
-    "Ctrl-Enter": () => runWasm(),
-    "Shift-Ctrl-Enter": () => compileAndRun(),
-    "Ctrl-/": "toggleComment",
+    // Keyboard shortcuts
+    state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, () => compile());
+    state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runWasm());
+    state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => compileAndRun());
+
+    if (callback) callback();
   });
 }
 
@@ -532,7 +533,7 @@ function setupResize() {
     const ratio = ((e.clientX - rect.left) / rect.width) * 100;
     const clamped = Math.min(Math.max(ratio, 25), 80);
     editorPanel.style.flex = `0 0 ${clamped}%`;
-    state.editor.refresh();
+    state.editor.layout();
   });
 
   document.addEventListener("mouseup", () => {
@@ -541,7 +542,7 @@ function setupResize() {
       handle.classList.remove("active");
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      state.editor.refresh();
+      state.editor.layout();
     }
   });
 }
@@ -584,7 +585,7 @@ function bindEvents() {
     dom.statusWasm.style.display = "none";
     setStatus("Ready", "idle");
     logToConsole("Created new file.", "info");
-    state.editor.setCursor({ line: 3, ch: 4 });
+    state.editor.setPosition({ lineNumber: 4, column: 5 });
     state.editor.focus();
   });
 
@@ -629,11 +630,12 @@ function bindEvents() {
 
 // ---- Bootstrap ----
 function boot() {
-  setupEditor();
-  setupResize();
-  setupExamples();
-  bindEvents();
-  initSDK();
+  setupEditor(() => {
+    setupResize();
+    setupExamples();
+    bindEvents();
+    initSDK();
+  });
 }
 
 // Wait for DOM + CodeMirror
