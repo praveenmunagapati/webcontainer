@@ -322,39 +322,65 @@ function removeProgressBar() {
 
 // ---- SDK Initialization ----
 async function initSDK() {
+  logToConsole("--- System Initialization Started ---", "system");
+  
+  // Browser Features Check
+  const coopEnabled = window.crossOriginIsolated;
+  const sabSupported = typeof SharedArrayBuffer !== "undefined";
+  logToConsole(`[Browser] Cross-Origin Isolation status: ${coopEnabled ? "ENABLED" : "DISABLED"}`, coopEnabled ? "success" : "error");
+  logToConsole(`[Browser] SharedArrayBuffer support: ${sabSupported ? "SUPPORTED" : "UNSUPPORTED"}`, sabSupported ? "success" : "error");
+  
+  if (!coopEnabled || !sabSupported) {
+    logToConsole("[Warning] Browser is not in a Secure Cross-Origin Isolated context. Wasmer multithreading may fail to spin up workers.", "warning");
+  }
+
+  const initStart = performance.now();
+
   try {
     dom.loaderStatus.textContent = "Loading Wasmer runtime…";
-    logToConsole("Initializing local Wasmer SDK…", "system");
+    logToConsole("[Wasmer] Loading runtime WebAssembly modules...", "info");
+    const wasmInitStart = performance.now();
     await init();
+    logToConsole(`[Wasmer] Runtime initialized in ${(performance.now() - wasmInitStart).toFixed(1)}ms`, "success");
 
+    logToConsole("[VFS] Initializing persistent workspace directory...", "info");
     state.projectDir = new Directory();
 
     dom.loaderStatus.textContent = "Loading local Clang compiler…";
-    logToConsole("Loading local clang.webc (this might take a few seconds)…", "system");
+    logToConsole("[Compiler] Fetching local clang.webc archive (105MB)...", "info");
+    const fetchStart = performance.now();
     const response = await fetch("clang.webc", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Failed to fetch clang.webc: ${response.statusText}`);
     }
     const arrayBuffer = await response.arrayBuffer();
+    logToConsole(`[Compiler] Download completed: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB in ${(performance.now() - fetchStart).toFixed(1)}ms`, "success");
+
+    logToConsole("[Compiler] Instantiating Clang compiler package (parsing WebC container)...", "info");
+    const parseStart = performance.now();
     state.clang = await Wasmer.fromFile(new Uint8Array(arrayBuffer));
+    logToConsole(`[Compiler] Package loaded and compiled in ${(performance.now() - parseStart).toFixed(1)}ms`, "success");
 
     state.sdkReady = true;
     dom.sdkBadge.classList.add("connected");
-    logToConsole("Wasmer SDK initialized. Clang compiler ready.", "success");
-    logToConsole("You can now write C code and compile it in your browser.", "info");
-
-    // Reveal app
-    dom.loadingOverlay.style.opacity = "0";
-    dom.loadingOverlay.style.transition = "opacity 0.4s ease";
+    setStatus("Ready", "idle");
+    logToConsole(`Success: System initialized successfully in ${(performance.now() - initStart).toFixed(1)}ms!`, "success");
+    logToConsole("Ready for offline compilation of C and C++ programs.", "info");
+    
+    // Hide loading overlay with smooth transition
     setTimeout(() => {
-      dom.loadingOverlay.classList.add("hidden");
-      dom.app.classList.remove("hidden");
-    }, 400);
+      dom.loadingOverlay.style.opacity = "0";
+      dom.loadingOverlay.style.transition = "opacity 0.4s ease";
+      setTimeout(() => {
+        dom.loadingOverlay.classList.add("hidden");
+        dom.app.classList.remove("hidden");
+      }, 400);
+    }, 500);
   } catch (err) {
     dom.loaderStatus.textContent = "Failed to initialize SDK.";
     dom.loaderStatus.style.color = "#FF6B6B";
-    logToConsole(`SDK initialization failed: ${err.message}`, "error");
-    console.error("SDK init error:", err);
+    logToConsole(`Error during system initialization: ${err.message}`, "error");
+    console.error("Initialization error:", err);
 
     // Still reveal app so user can see console
     setTimeout(() => {
@@ -376,12 +402,20 @@ async function compile() {
   dom.statusWasm.style.display = "none";
 
   const sourceCode = state.editor.getValue();
-  logToConsole("Starting compilation…", "system");
+  logToConsole("--- Compilation Process Started ---", "system");
+  logToConsole(`Source Language: ${state.language.toUpperCase()}`, "info");
+  logToConsole(`Source Length: ${sourceCode.length} characters`, "info");
+
+  const compileStart = performance.now();
 
   try {
     const ext = state.language === 'cpp' ? 'cpp' : 'c';
     const filename = `main.${ext}`;
+    
+    logToConsole(`[VFS] Writing main code to virtual file "/project/${filename}"...`, "info");
+    const vfsWriteStart = performance.now();
     await state.projectDir.writeFile(filename, sourceCode);
+    logToConsole(`[VFS] Write completed in ${(performance.now() - vfsWriteStart).toFixed(1)}ms`, "info");
 
     let compileArgs = ["-O1", "-fno-spell-checking"];
     if (state.language === 'cpp') {
@@ -390,12 +424,16 @@ async function compile() {
       compileArgs.push(`/project/${filename}`, "-o", "/project/main.wasm");
     }
 
+    logToConsole(`[Clang] Running compilation command: clang ${compileArgs.join(" ")}`, "system");
+    const clangRunStart = performance.now();
     const instance = await state.clang.entrypoint.run({
       args: compileArgs,
       mount: { "/project": state.projectDir },
     });
 
+    logToConsole(`[Clang] Compiler process instantiated. Waiting for compilation to finish...`, "info");
     const output = await instance.wait();
+    logToConsole(`[Clang] Process finished in ${(performance.now() - clangRunStart).toFixed(1)}ms with exit code ${output.code}`, "info");
 
     // Capture stderr for errors/warnings
     if (output.stderr) {
@@ -403,36 +441,37 @@ async function compile() {
         ? output.stderr
         : new TextDecoder().decode(output.stderr);
       if (errText.trim()) {
+        logToConsole(`[Clang] Diagnostics Output:`, "warning");
         errText.trim().split("\n").forEach((line) => {
-          logToConsole(line, line.toLowerCase().includes("error") ? "error" : "warning");
+          logToConsole(`  ${line}`, line.toLowerCase().includes("error") ? "error" : "warning");
         });
       }
     }
 
     if (output.ok) {
+      logToConsole(`[VFS] Reading compiled executable "/project/main.wasm" from virtual filesystem...`, "info");
+      const vfsReadStart = performance.now();
       const wasmBinary = await state.projectDir.readFile("main.wasm");
+      logToConsole(`[VFS] Read completed in ${(performance.now() - vfsReadStart).toFixed(1)}ms`, "info");
       state.compiledBinary = wasmBinary;
 
       completeProgressBar(true);
       setStatus("Compiled", "success");
-      logToConsole(
-        `Compilation successful! WASM binary: ${wasmBinary.byteLength.toLocaleString()} bytes`,
-        "success"
-      );
-
+      logToConsole(`Success: Program compiled to WebAssembly (${wasmBinary.byteLength.toLocaleString()} bytes) in ${(performance.now() - compileStart).toFixed(1)}ms!`, "success");
+      
       dom.statusWasm.textContent = `WASM: ${wasmBinary.byteLength.toLocaleString()} bytes`;
       dom.statusWasm.style.display = "inline-flex";
       setButtonStates(false, true);
     } else {
       completeProgressBar(false);
       setStatus("Error", "error");
-      logToConsole("Compilation failed. Check errors above.", "error");
+      logToConsole(`Error: Compilation process returned exit status code ${output.code}`, "error");
       setButtonStates(false, false);
     }
   } catch (err) {
     completeProgressBar(false);
     setStatus("Error", "error");
-    logToConsole(`Compilation error: ${err.message}`, "error");
+    logToConsole(`Compilation failed with exception: ${err.message}`, "error");
     console.error("Compile error:", err);
     setButtonStates(false, false);
   } finally {
@@ -448,22 +487,40 @@ async function runWasm() {
   setStatus("Running…", "running");
   dom.programOutput.innerHTML = "";
   switchTab("output");
-  logToConsole("Running compiled program…", "system");
+  
+  logToConsole("--- Execution Process Started ---", "system");
+  const runStart = performance.now();
 
   try {
+    logToConsole(`[WebAssembly] Compiling ${state.compiledBinary.byteLength.toLocaleString()} byte binary...`, "info");
+    const wasmCompStart = performance.now();
     const module = await WebAssembly.compile(state.compiledBinary);
+    logToConsole(`[WebAssembly] Native compilation completed in ${(performance.now() - wasmCompStart).toFixed(1)}ms`, "info");
 
+    logToConsole(`[Wasmer] Creating WASI worker package from compiled binary...`, "info");
+    const pkgStart = performance.now();
     const pkg = await Wasmer.fromFile(state.compiledBinary);
+    logToConsole(`[Wasmer] Package initialized in ${(performance.now() - pkgStart).toFixed(1)}ms`, "info");
+
+    logToConsole(`[Wasmer] Spawning process and running entrypoint...`, "info");
+    const execStart = performance.now();
     const instance = await pkg.entrypoint.run();
+    
+    logToConsole(`[Wasmer] Process spawned. Awaiting output...`, "info");
     const result = await instance.wait();
+    logToConsole(`[Wasmer] Process execution completed in ${(performance.now() - execStart).toFixed(1)}ms with exit code ${result.code}`, "info");
 
     if (result.stdout) {
       const stdoutText = typeof result.stdout === "string"
         ? result.stdout
         : new TextDecoder().decode(result.stdout);
       if (stdoutText.trim()) {
+        logToConsole(`[Wasmer] Captured stdout output:`, "info");
         stdoutText.split("\n").forEach((line) => {
-          if (line) logToProgram(line, "stdout");
+          if (line) {
+            logToProgram(line, "stdout");
+            logToConsole(`  [stdout] ${line}`, "info");
+          }
         });
       }
     }
@@ -473,17 +530,21 @@ async function runWasm() {
         ? result.stderr
         : new TextDecoder().decode(result.stderr);
       if (stderrText.trim()) {
+        logToConsole(`[Wasmer] Captured stderr output:`, "warning");
         stderrText.split("\n").forEach((line) => {
-          if (line) logToProgram(line, "error");
+          if (line) {
+            logToProgram(line, "error");
+            logToConsole(`  [stderr] ${line}`, "warning");
+          }
         });
       }
     }
 
     const exitCode = result.code ?? 0;
-    logToConsole(`Program exited with code ${exitCode}`, exitCode === 0 ? "success" : "warning");
+    logToConsole(`Success: Program execution finished in ${(performance.now() - runStart).toFixed(1)}ms (exit code ${exitCode})`, exitCode === 0 ? "success" : "warning");
     setStatus("Ready", "idle");
   } catch (err) {
-    logToConsole(`Runtime error: ${err.message}`, "error");
+    logToConsole(`Runtime execution failed with exception: ${err.message}`, "error");
     logToProgram(`Runtime Error: ${err.message}`, "error");
     setStatus("Error", "error");
     console.error("Run error:", err);
