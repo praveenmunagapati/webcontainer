@@ -501,7 +501,7 @@ async function compile() {
         
         // Render Algorithm
         dom.algorithmOutput.innerHTML = `
-          <div class="algorithm-container">
+          <div class="algorithm-container active">
             <h3 style="margin-bottom:16px; font-size:15px; font-weight:600; color:var(--text-primary);">Algorithm Steps for main.${state.language === 'cpp' ? 'cpp' : 'c'}</h3>
             <ol class="algorithm-list">
               ${analysis.steps.map(step => `<li class="algorithm-step">${escapeHtml(step)}</li>`).join("")}
@@ -511,11 +511,7 @@ async function compile() {
         
         // Render Flowchart
         const svgHtml = renderFlowchartToSvg(analysis);
-        dom.flowchartOutput.innerHTML = `
-          <div class="flowchart-container">
-            ${svgHtml}
-          </div>
-        `;
+        dom.flowchartOutput.innerHTML = svgHtml;
         logToConsole(`[Analysis] Flowchart and algorithm generated in ${(performance.now() - analysisStart).toFixed(1)}ms`, "success");
       } catch (analErr) {
         console.error("Analysis generation error:", analErr);
