@@ -14,6 +14,7 @@ const state = {
   isCompiling: false,
   isRunning: false,
   projectDir: null,
+  language: "c",
 };
 
 // ---- DOM refs ----
@@ -45,6 +46,7 @@ const dom = {
   modalClose:     $("#modal-close"),
   tabConsole:     $("#tab-console"),
   tabOutput:      $("#tab-output"),
+  selectLanguage: $("#select-language"),
 };
 
 // ---- Examples ----
@@ -225,6 +227,33 @@ int main() {
   },
 ];
 
+// Append C++ examples programmatically
+EXAMPLES.push(
+  {
+    lang: "cpp",
+    title: "Hello World (C++)",
+    description: "Standard C++ greeting program optimized for compile speed.",
+    code: `#include <cstdio>\n\nint main() {\n    std::printf("Hello, C++ World!\\n");\n    return 0;\n}\n`
+  },
+  {
+    lang: "cpp",
+    title: "Vector Sorting",
+    description: "Demonstrates std::vector, range-based for loops, and std::sort.",
+    code: `#include <cstdio>\n#include <vector>\n#include <algorithm>\n\nint main() {\n    std::vector<int> numbers = {42, 17, 93, 8, 55};\n    \n    std::printf("Unsorted elements:\\n");\n    for (int num : numbers) {\n        std::printf(" %d", num);\n    }\n    std::printf("\\n");\n    \n    std::sort(numbers.begin(), numbers.end());\n    \n    std::printf("Sorted elements:\\n");\n    for (int num : numbers) {\n        std::printf(" %d", num);\n    }\n    std::printf("\\n");\n    \n    return 0;\n}\n`
+  },
+  {
+    lang: "cpp",
+    title: "OOP & Polymorphism",
+    description: "Simple class hierarchy demonstrating virtual inheritance.",
+    code: `#include <cstdio>\n\nclass Shape {\nprotected:\n    const char* name;\npublic:\n    Shape(const char* n) : name(n) {}\n    virtual void draw() {\n        std::printf("Drawing shape: %s\\n", name);\n    }\n    virtual ~Shape() {}\n};\n\nclass Circle : public Shape {\nprivate:\n    double radius;\npublic:\n    Circle(const char* n, double r) : Shape(n), radius(r) {}\n    void draw() override {\n        std::printf("Drawing circle: %s with radius %.1f\\n", name, radius);\n    }\n};\n\nint main() {\n    Shape* s1 = new Shape("Generic Polygon");\n    Shape* s2 = new Circle("MyCircle", 5.5);\n    \n    s1->draw();\n    s2->draw();\n    \n    delete s1;\n    delete s2;\n    return 0;\n}\n`
+  }
+);
+
+// Default to 'c' for examples missing a language tag
+EXAMPLES.forEach(ex => {
+  if (!ex.lang) ex.lang = "c";
+});
+
 // ---- Utility: Console Logging ----
 function timestamp() {
   const d = new Date();
@@ -350,10 +379,19 @@ async function compile() {
   logToConsole("Starting compilation…", "system");
 
   try {
-    await state.projectDir.writeFile("main.c", sourceCode);
+    const ext = state.language === 'cpp' ? 'cpp' : 'c';
+    const filename = `main.${ext}`;
+    await state.projectDir.writeFile(filename, sourceCode);
+
+    let compileArgs = ["-O1", "-fno-spell-checking"];
+    if (state.language === 'cpp') {
+      compileArgs.push("-x", "c++", `/project/${filename}`, "-o", "/project/main.wasm", "-lc++", "-lc++abi");
+    } else {
+      compileArgs.push(`/project/${filename}`, "-o", "/project/main.wasm");
+    }
 
     const instance = await state.clang.entrypoint.run({
-      args: ["-O1", "-fno-spell-checking", "/project/main.c", "-o", "/project/main.wasm"],
+      args: compileArgs,
       mount: { "/project": state.projectDir },
     });
 
@@ -545,16 +583,21 @@ function setupResize() {
 }
 
 // ---- Examples Modal ----
-function setupExamples() {
-  dom.examplesList.innerHTML = EXAMPLES.map(
-    (ex, i) => `
-    <div class="example-card" data-index="${i}">
-      <h4>${ex.title}</h4>
-      <p>${ex.description}</p>
+function renderExamples() {
+  const filtered = EXAMPLES.map((ex, i) => ({ ex, originalIndex: i }))
+    .filter(item => item.ex.lang === state.language);
+  
+  dom.examplesList.innerHTML = filtered.map(
+    (item) => `
+    <div class="example-card" data-index="${item.originalIndex}">
+      <h4>${item.ex.title}</h4>
+      <p>${item.ex.description}</p>
     </div>
   `
   ).join("");
+}
 
+function setupExamples() {
   dom.examplesList.addEventListener("click", (e) => {
     const card = e.target.closest(".example-card");
     if (!card) return;
@@ -576,7 +619,10 @@ function bindEvents() {
   dom.btnCompileRun.addEventListener("click", compileAndRun);
 
   dom.btnNew.addEventListener("click", () => {
-    state.editor.setValue(`#include <stdio.h>\n\nint main() {\n    \n    return 0;\n}\n`);
+    const defaultCode = state.language === 'cpp'
+      ? `#include <iostream>\n\nint main() {\n    \n    return 0;\n}\n`
+      : `#include <stdio.h>\n\nint main() {\n    \n    return 0;\n}\n`;
+    state.editor.setValue(defaultCode);
     state.compiledBinary = null;
     setButtonStates(false, false);
     dom.statusWasm.style.display = "none";
@@ -587,7 +633,33 @@ function bindEvents() {
   });
 
   dom.btnExamples.addEventListener("click", () => {
+    renderExamples();
     dom.examplesModal.classList.remove("hidden");
+  });
+
+  // Language Select Event Listener
+  dom.selectLanguage.addEventListener("change", (e) => {
+    const newLang = e.target.value;
+    if (newLang === state.language) return;
+
+    state.language = newLang;
+    monaco.editor.setModelLanguage(state.editor.getModel(), newLang === 'cpp' ? 'cpp' : 'c');
+    
+    const ext = newLang === 'cpp' ? 'cpp' : 'c';
+    dom.tabName.textContent = `main.${ext}`;
+    dom.titleFilename.textContent = `main.${ext}`;
+    
+    state.compiledBinary = null;
+    setButtonStates(false, false);
+    dom.statusWasm.style.display = "none";
+    setStatus("Ready", "idle");
+    
+    const defaultCode = newLang === 'cpp'
+      ? `#include <cstdio>\n\nint main() {\n    std::printf("Hello, C++!\\n");\n    return 0;\n}\n`
+      : `#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}\n`;
+    state.editor.setValue(defaultCode);
+    
+    logToConsole(`Switched language to ${newLang === 'cpp' ? 'C++' : 'C'}.`, "info");
   });
 
   dom.modalClose.addEventListener("click", () => {
