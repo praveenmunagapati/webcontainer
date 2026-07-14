@@ -282,6 +282,23 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// ---- Promise Timeout Helper ----
+function promiseWithTimeout(promise, ms, errorMsg = "Operation timed out") {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMsg));
+    }, ms);
+  });
+  return Promise.race([
+    promise.then((val) => {
+      clearTimeout(timeoutId);
+      return val;
+    }),
+    timeoutPromise
+  ]);
+}
+
 // ---- Status Management ----
 function setStatus(label, iconClass) {
   const iconEl = dom.statusState.querySelector(".status-icon");
@@ -405,6 +422,9 @@ async function compile() {
   logToConsole("--- Compilation Process Started ---", "system");
   logToConsole(`Source Language: ${state.language.toUpperCase()}`, "info");
   logToConsole(`Source Length: ${sourceCode.length} characters`, "info");
+  if (state.language === 'cpp') {
+    logToConsole("[Tip] Including standard C++ headers like <iostream>, <vector>, or <algorithm> adds significant compilation overhead inside the browser's virtual filesystem. Consider using <cstdio> (std::printf) or custom implementations for faster builds.", "warning");
+  }
 
   const compileStart = performance.now();
 
@@ -417,11 +437,12 @@ async function compile() {
     await state.projectDir.writeFile(filename, sourceCode);
     logToConsole(`[VFS] Write completed in ${(performance.now() - vfsWriteStart).toFixed(1)}ms`, "info");
 
-    let compileArgs = ["-O1", "-fno-spell-checking"];
+    let compileArgs = [];
     if (state.language === 'cpp') {
-      compileArgs.push("-x", "c++", `/project/${filename}`, "-o", "/project/main.wasm", "-lc++", "-lc++abi");
+      // Use -O0 and disable exceptions/RTTI to fit within browser/Wasmer WASM memory limits
+      compileArgs.push("-O0", "-fno-spell-checking", "-fno-exceptions", "-fno-rtti", "-x", "c++", `/project/${filename}`, "-o", "/project/main.wasm", "-lc++", "-lc++abi");
     } else {
-      compileArgs.push(`/project/${filename}`, "-o", "/project/main.wasm");
+      compileArgs.push("-O1", "-fno-spell-checking", `/project/${filename}`, "-o", "/project/main.wasm");
     }
 
     logToConsole(`[Clang] Running compilation command: clang ${compileArgs.join(" ")}`, "system");
@@ -431,8 +452,13 @@ async function compile() {
       mount: { "/project": state.projectDir },
     });
 
-    logToConsole(`[Clang] Compiler process instantiated. Waiting for compilation to finish...`, "info");
-    const output = await instance.wait();
+    const compileTimeout = state.language === 'cpp' ? 90000 : 30000;
+    logToConsole(`[Clang] Compiler process instantiated. Waiting for compilation to finish (${compileTimeout / 1000}s timeout)...`, "info");
+    const output = await promiseWithTimeout(
+      instance.wait(),
+      compileTimeout,
+      "Compilation timed out. The compiler process may have crashed internally or exceeded browser resource limits."
+    );
     logToConsole(`[Clang] Process finished in ${(performance.now() - clangRunStart).toFixed(1)}ms with exit code ${output.code}`, "info");
 
     // Capture stderr for errors/warnings
@@ -506,8 +532,12 @@ async function runWasm() {
     const execStart = performance.now();
     const instance = await pkg.entrypoint.run();
     
-    logToConsole(`[Wasmer] Process spawned. Awaiting output...`, "info");
-    const result = await instance.wait();
+    logToConsole(`[Wasmer] Process spawned. Awaiting output (20s timeout)...`, "info");
+    const result = await promiseWithTimeout(
+      instance.wait(),
+      20000,
+      "Program execution timed out."
+    );
     logToConsole(`[Wasmer] Process execution completed in ${(performance.now() - execStart).toFixed(1)}ms with exit code ${result.code}`, "info");
 
     if (result.stdout) {
