@@ -324,6 +324,18 @@ html, body {
   filter: brightness(1.1);
 }
 
+/* Danger: Stop compilation */
+.toolbar-btn.btn-danger {
+  background: rgba(255, 107, 107, 0.12);
+  color: #FF8585;
+  border-color: rgba(255, 107, 107, 0.2);
+}
+.toolbar-btn.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.25);
+  box-shadow: 0 0 12px rgba(255, 107, 107, 0.15);
+}
+
+
 .toolbar-divider {
   width: 1px;
   height: 22px;
@@ -873,90 +885,106 @@ html, body {
 }
 
 
-.flowchart-svg {
+/* =============================================
+   Third-Party Library Stylings (KaTeX, Pseudocode, Mermaid)
+   ============================================= */
+
+/* Pseudocode LaTeX Styles */
+#latex-algorithm {
+  font-size: 14px !important;
+  color: var(--text-primary) !important;
+  line-height: 1.6;
+}
+
+#latex-algorithm .ps-root {
+  border: none !important;
+  font-family: var(--font-ui) !important;
+  background: transparent !important;
+}
+
+#latex-algorithm .ps-keyword {
+  color: #a29bfe !important;
+  font-weight: 700 !important;
+}
+
+#latex-algorithm .ps-line {
+  border-left-color: var(--border-default) !important;
+}
+
+#latex-algorithm .ps-lineno {
+  color: var(--text-muted) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 12px !important;
+  padding-right: 12px !important;
+}
+
+#latex-algorithm .ps-comment {
+  color: var(--text-muted) !important;
+  font-style: italic !important;
+}
+
+/* Custom Mermaid Flowchart Styles */
+.flowchart-container {
+  display: none;
+  height: 100%;
+  overflow: auto;
+}
+
+.flowchart-container.active {
   display: block;
-  margin: 0 auto;
 }
 
-/* SVG Flowchart Nodes & Paths */
-.flow-node {
-  stroke-width: 2px;
-  transition: var(--transition);
-  cursor: pointer;
+.mermaid-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100%;
+  padding: 24px;
+  background: var(--bg-deep) radial-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px) !important;
+  background-size: 20px 20px !important;
+  overflow: auto;
 }
 
-.flow-node-text {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  fill: var(--text-primary);
-  text-anchor: middle;
-  dominant-baseline: middle;
-  pointer-events: none;
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+  font-family: var(--font-ui) !important;
 }
 
-/* Node Types */
-.flow-start, .flow-end {
-  fill: rgba(108, 92, 231, 0.15);
-  stroke: var(--accent-primary);
-  filter: drop-shadow(0 0 4px rgba(108, 92, 231, 0.2));
+/* Customize Mermaid default dark theme borders and text */
+.mermaid .node rect,
+.mermaid .node circle,
+.mermaid .node polygon,
+.mermaid .node path {
+  fill-opacity: 0.85 !important;
+  transition: var(--transition) !important;
 }
 
-.flow-start:hover, .flow-end:hover {
-  fill: rgba(108, 92, 231, 0.25);
-  filter: drop-shadow(0 0 10px rgba(108, 92, 231, 0.5));
+.mermaid .node:hover rect,
+.mermaid .node:hover circle,
+.mermaid .node:hover polygon,
+.mermaid .node:hover path {
+  filter: drop-shadow(0 0 8px rgba(108, 92, 231, 0.4)) !important;
 }
 
-.flow-process {
-  fill: rgba(116, 185, 255, 0.12);
-  stroke: var(--accent-info);
-  filter: drop-shadow(0 0 4px rgba(116, 185, 255, 0.15));
+.mermaid .edgePaths .edgePath .path {
+  stroke: var(--text-muted) !important;
+  stroke-width: 2px !important;
 }
 
-.flow-process:hover {
-  fill: rgba(116, 185, 255, 0.22);
-  filter: drop-shadow(0 0 10px rgba(116, 185, 255, 0.4));
+.mermaid .marker {
+  fill: var(--text-muted) !important;
+  stroke: none !important;
 }
 
-.flow-decision {
-  fill: rgba(253, 203, 110, 0.12);
-  stroke: var(--accent-warning);
-  filter: drop-shadow(0 0 4px rgba(253, 203, 110, 0.15));
+.mermaid .edgeLabel rect {
+  fill: var(--bg-secondary) !important;
 }
 
-.flow-decision:hover {
-  fill: rgba(253, 203, 110, 0.22);
-  filter: drop-shadow(0 0 10px rgba(253, 203, 110, 0.4));
+.mermaid .edgeLabel span {
+  color: var(--text-secondary) !important;
+  font-family: var(--font-ui) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
 }
 
-.flow-io {
-  fill: rgba(0, 184, 148, 0.12);
-  stroke: var(--accent-success);
-  filter: drop-shadow(0 0 4px rgba(0, 184, 148, 0.15));
-}
-
-.flow-io:hover {
-  fill: rgba(0, 184, 148, 0.22);
-  filter: drop-shadow(0 0 10px rgba(0, 184, 148, 0.4));
-}
-
-/* Connection Lines */
-.flow-line {
-  stroke: var(--text-muted);
-  stroke-width: 2px;
-  fill: none;
-  marker-end: url(#arrow);
-  transition: var(--transition);
-}
-
-.flow-line-label {
-  font-family: var(--font-ui);
-  font-size: 10px;
-  font-weight: 600;
-  fill: var(--text-muted);
-  text-anchor: middle;
-}
-
-/* Marker Arrow */
-.flow-arrow-marker {
-  fill: var(--text-muted);
-}

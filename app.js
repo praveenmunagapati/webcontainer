@@ -5,6 +5,29 @@
 
 import { init, Wasmer, Directory } from "./node_modules/@wasmer/sdk/dist/index.mjs";
 
+// Initialize Mermaid with dark theme variables matching our UI
+if (typeof mermaid !== "undefined") {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "dark",
+    securityLevel: "loose",
+    themeVariables: {
+      background: "#0f1420",
+      primaryColor: "#1a2137",
+      primaryTextColor: "#e4e8f1",
+      primaryBorderColor: "#6C5CE7",
+      lineColor: "#8892a8",
+      secondaryColor: "#151b2b",
+      tertiaryColor: "#1e2740"
+    },
+    flowchart: {
+      useMaxWidth: false,
+      htmlLabels: true,
+      curve: "basis"
+    }
+  });
+}
+
 // ---- State ----
 const state = {
   sdkReady: false,
@@ -15,6 +38,7 @@ const state = {
   isRunning: false,
   projectDir: null,
   language: "c",
+  activeCompileInstance: null,
 };
 
 // ---- DOM refs ----
@@ -311,7 +335,33 @@ function setStatus(label, iconClass) {
 }
 
 function setButtonStates(compiling, hasWasm) {
-  dom.btnCompile.disabled    = compiling;
+  if (compiling) {
+    dom.btnCompile.classList.remove("btn-primary");
+    dom.btnCompile.classList.add("btn-danger");
+    dom.btnCompile.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+      </svg>
+      <span>Stop</span>
+    `;
+    dom.btnCompile.disabled = false;
+    dom.btnCompile.title = "Stop Compilation";
+  } else {
+    dom.btnCompile.classList.add("btn-primary");
+    dom.btnCompile.classList.remove("btn-danger");
+    dom.btnCompile.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+      </svg>
+      <span>Compile</span>
+    `;
+    dom.btnCompile.disabled = false;
+    dom.btnCompile.title = "Compile (Ctrl+B)";
+  }
+
   dom.btnRun.disabled        = compiling || !hasWasm;
   dom.btnCompileRun.disabled = compiling;
 }
@@ -412,11 +462,36 @@ async function initSDK() {
 }
 
 // ---- Compilation ----
+function stopCompilation() {
+  if (!state.isCompiling) return;
+  
+  logToConsole("--- Compilation Interrupted by User ---", "warning");
+  if (state.activeCompileInstance) {
+    try {
+      state.activeCompileInstance.free();
+    } catch (e) {
+      console.warn("Error freeing compile instance:", e);
+    }
+    state.activeCompileInstance = null;
+  }
+  
+  state.isCompiling = false;
+  completeProgressBar(false);
+  setStatus("Cancelled", "error");
+  setButtonStates(false, false);
+}
+
 async function compile() {
-  if (!state.sdkReady || state.isCompiling) return;
+  if (!state.sdkReady) return;
+  
+  if (state.isCompiling) {
+    stopCompilation();
+    return;
+  }
 
   state.isCompiling = true;
   state.compiledBinary = null;
+  state.activeCompileInstance = null;
   setStatus("Compiling…", "compiling");
   setButtonStates(true, false);
   showProgressBar();
@@ -439,6 +514,7 @@ async function compile() {
     logToConsole(`[VFS] Writing main code to virtual file "/project/${filename}"...`, "info");
     const vfsWriteStart = performance.now();
     await state.projectDir.writeFile(filename, sourceCode);
+    if (!state.isCompiling) return;
     logToConsole(`[VFS] Write completed in ${(performance.now() - vfsWriteStart).toFixed(1)}ms`, "info");
 
     let compileArgs = [];
@@ -456,13 +532,13 @@ async function compile() {
       mount: { "/project": state.projectDir },
     });
 
-    const compileTimeout = state.language === 'cpp' ? 90000 : 30000;
-    logToConsole(`[Clang] Compiler process instantiated. Waiting for compilation to finish (${compileTimeout / 1000}s timeout)...`, "info");
-    const output = await promiseWithTimeout(
-      instance.wait(),
-      compileTimeout,
-      "Compilation timed out. The compiler process may have crashed internally or exceeded browser resource limits."
-    );
+    if (!state.isCompiling) return;
+    state.activeCompileInstance = instance;
+
+    logToConsole(`[Clang] Compiler process instantiated. Waiting for compilation to finish...`, "info");
+    const output = await instance.wait();
+    if (!state.isCompiling) return;
+    state.activeCompileInstance = null;
     logToConsole(`[Clang] Process finished in ${(performance.now() - clangRunStart).toFixed(1)}ms with exit code ${output.code}`, "info");
 
     // Capture stderr for errors/warnings
@@ -482,6 +558,7 @@ async function compile() {
       logToConsole(`[VFS] Reading compiled executable "/project/main.wasm" from virtual filesystem...`, "info");
       const vfsReadStart = performance.now();
       const wasmBinary = await state.projectDir.readFile("main.wasm");
+      if (!state.isCompiling) return;
       logToConsole(`[VFS] Read completed in ${(performance.now() - vfsReadStart).toFixed(1)}ms`, "info");
       state.compiledBinary = wasmBinary;
 
@@ -492,45 +569,24 @@ async function compile() {
       dom.statusWasm.textContent = `WASM: ${wasmBinary.byteLength.toLocaleString()} bytes`;
       dom.statusWasm.style.display = "inline-flex";
       setButtonStates(false, true);
-
-      // --- GENERATE FLOWCHART & ALGORITHM ---
-      try {
-        logToConsole("[Analysis] Generating flowchart and step-by-step algorithm...", "info");
-        const analysisStart = performance.now();
-        const analysis = parseCodeToFlow(sourceCode, state.language);
-        
-        // Render Algorithm
-        dom.algorithmOutput.innerHTML = `
-          <div class="algorithm-container active">
-            <h3 style="margin-bottom:16px; font-size:15px; font-weight:600; color:var(--text-primary);">Algorithm Steps for main.${state.language === 'cpp' ? 'cpp' : 'c'}</h3>
-            <ol class="algorithm-list">
-              ${analysis.steps.map(step => `<li class="algorithm-step">${escapeHtml(step)}</li>`).join("")}
-            </ol>
-          </div>
-        `;
-        
-        // Render Flowchart
-        const svgHtml = renderFlowchartToSvg(analysis);
-        dom.flowchartOutput.innerHTML = svgHtml;
-        logToConsole(`[Analysis] Flowchart and algorithm generated in ${(performance.now() - analysisStart).toFixed(1)}ms`, "success");
-      } catch (analErr) {
-        console.error("Analysis generation error:", analErr);
-        logToConsole(`[Analysis] Failed to generate: ${analErr.message}`, "warning");
-      }
-
-      completeProgressBar(true);
-      setStatus("Compiled", "success");
+    } else {
+      completeProgressBar(false);
+      setStatus("Error", "error");
       logToConsole(`Error: Compilation process returned exit status code ${output.code}`, "error");
       setButtonStates(false, false);
     }
   } catch (err) {
+    if (!state.isCompiling) return;
     completeProgressBar(false);
     setStatus("Error", "error");
     logToConsole(`Compilation failed with exception: ${err.message}`, "error");
     console.error("Compile error:", err);
     setButtonStates(false, false);
   } finally {
-    state.isCompiling = false;
+    if (state.isCompiling) {
+      state.isCompiling = false;
+      state.activeCompileInstance = null;
+    }
   }
 }
 
@@ -561,12 +617,8 @@ async function runWasm() {
     const execStart = performance.now();
     const instance = await pkg.entrypoint.run();
     
-    logToConsole(`[Wasmer] Process spawned. Awaiting output (20s timeout)...`, "info");
-    const result = await promiseWithTimeout(
-      instance.wait(),
-      20000,
-      "Program execution timed out."
-    );
+    logToConsole(`[Wasmer] Process spawned. Awaiting output...`, "info");
+    const result = await instance.wait();
     logToConsole(`[Wasmer] Process execution completed in ${(performance.now() - execStart).toFixed(1)}ms with exit code ${result.code}`, "info");
 
     if (result.stdout) {
@@ -658,9 +710,15 @@ function setupEditor(callback) {
 
     // Track unsaved changes
     let savedValue = state.editor.getValue();
+    let renderTimeout;
     state.editor.onDidChangeModelContent(() => {
       const changed = state.editor.getValue() !== savedValue;
       dom.unsavedDot.style.display = changed ? "inline-block" : "none";
+      
+      clearTimeout(renderTimeout);
+      renderTimeout = setTimeout(() => {
+        renderFlowchartAndAlgorithm();
+      }, 800);
     });
 
     // Keyboard shortcuts
@@ -734,6 +792,7 @@ function setupExamples() {
     dom.statusWasm.style.display = "none";
     setStatus("Ready", "idle");
     logToConsole(`Loaded example: ${EXAMPLES[idx].title}`, "info");
+    renderFlowchartAndAlgorithm();
   });
 }
 
@@ -755,6 +814,7 @@ function bindEvents() {
     logToConsole("Created new file.", "info");
     state.editor.setPosition({ lineNumber: 4, column: 5 });
     state.editor.focus();
+    renderFlowchartAndAlgorithm();
   });
 
   dom.btnExamples.addEventListener("click", () => {
@@ -785,6 +845,7 @@ function bindEvents() {
     state.editor.setValue(defaultCode);
     
     logToConsole(`Switched language to ${newLang === 'cpp' ? 'C++' : 'C'}.`, "info");
+    renderFlowchartAndAlgorithm();
   });
 
   dom.modalClose.addEventListener("click", () => {
@@ -800,8 +861,6 @@ function bindEvents() {
   dom.btnClearConsole.addEventListener("click", () => {
     dom.consoleOutput.innerHTML = "";
     dom.programOutput.innerHTML = "";
-    dom.algorithmOutput.innerHTML = `<div class="tab-placeholder">Compile your code to generate a step-by-step algorithm.</div>`;
-    dom.flowchartOutput.innerHTML = `<div class="tab-placeholder">Compile your code to render a control flow diagram.</div>`;
     logToConsole("Console cleared.", "info");
   });
 
@@ -832,6 +891,7 @@ function boot() {
     setupResize();
     setupExamples();
     bindEvents();
+    renderFlowchartAndAlgorithm();
     initSDK();
   });
 }
@@ -844,6 +904,157 @@ if (document.readyState === "loading") {
 }
 
 // ---- Flowchart and Algorithm Helpers ----
+function renderFlowchartAndAlgorithm() {
+  if (!state.editor) return;
+  const sourceCode = state.editor.getValue();
+  if (!sourceCode) return;
+
+  try {
+    const analysis = parseCodeToFlow(sourceCode, state.language);
+    
+    // 1. Render Algorithm using pseudocode.js
+    const latex = parseCodeToPseudocode(sourceCode, state.language);
+    dom.algorithmOutput.innerHTML = `
+      <div class="algorithm-container active" style="padding:16px;">
+        <div id="latex-algorithm" class="pseudocode-pre" style="background:var(--bg-secondary); border:1px solid var(--border-default); padding:16px; border-radius:var(--radius-md); font-family:var(--font-ui);">
+          ${escapeHtml(latex)}
+        </div>
+      </div>
+    `;
+    
+    if (typeof pseudocode !== 'undefined') {
+      pseudocode.renderElement(document.getElementById("latex-algorithm"), {
+        lineNumber: true,
+        lineNumberFrame: true,
+        captionCount: 0
+      });
+    }
+    
+    // 2. Render Flowchart using Mermaid
+    const mermaidCode = generateMermaidGraph(analysis.nodes, analysis.links);
+    dom.flowchartOutput.innerHTML = `
+      <div class="mermaid-container" style="display:flex; justify-content:center; align-items:center; min-height:300px; padding:16px; overflow:auto; background:var(--bg-secondary); border:1px solid var(--border-default); border-radius:var(--radius-md);">
+        <pre class="mermaid" id="flowchart-mermaid" style="background:transparent; margin:0; overflow:visible;">
+          ${escapeHtml(mermaidCode)}
+        </pre>
+      </div>
+    `;
+    
+    if (typeof mermaid !== 'undefined') {
+      mermaid.run({
+        nodes: [document.getElementById("flowchart-mermaid")]
+      });
+    }
+  } catch (err) {
+    console.error("Analysis generation error:", err);
+  }
+}
+
+function conditionToNaturalLanguage(cond) {
+  if (!cond) return "";
+  let clean = cond.trim();
+  
+  // Replace comparison operators
+  clean = clean
+    .replace(/\s*==\s*/g, " equal to ")
+    .replace(/\s*!=\s*/g, " not equal to ")
+    .replace(/\s*<=\s*/g, " less than or equal to ")
+    .replace(/\s*>=\s*/g, " greater than or equal to ")
+    .replace(/\s*<\s*/g, " less than ")
+    .replace(/\s*>\s*/g, " greater than ");
+    
+  // Replace logical operators
+  clean = clean
+    .replace(/\s*&&\s*/g, " and ")
+    .replace(/\s*\|\|\s*/g, " or ");
+    
+  return clean;
+}
+
+function toNaturalLanguage(stmt) {
+  if (!stmt) return "";
+  let clean = stmt.replace(";", "").replace("std::", "").trim();
+  
+  if (clean.startsWith("return ") || clean === "return" || clean.startsWith("exit")) {
+    const val = clean.replace(/return|exit|\(|\)/g, "").trim();
+    return val ? `Return ${val}` : "Exit";
+  }
+  
+  if (clean.includes("printf") || clean.includes("cout")) {
+    let printClean = cleanPrintStatement(clean);
+    if (printClean.startsWith('"') && printClean.endsWith('"')) {
+      printClean = printClean.substring(1, printClean.length - 1);
+    }
+    return `Print ${printClean}`;
+  }
+  
+  if (clean.includes("scanf") || clean.includes("cin")) {
+    let vars = clean.replace(/scanf|cin|>>|<<|&|\(|\)/g, "").trim();
+    return `Read ${vars}`;
+  }
+  
+  const arrDeclMatch = clean.match(/(?:int|float|double|char|long long)\s+(\w+)\[\]\s*=\s*\{(.*)\}/);
+  if (arrDeclMatch) {
+    const name = arrDeclMatch[1];
+    const elements = arrDeclMatch[2].trim();
+    return `Create array "${name}" with elements [${elements}]`;
+  }
+  
+  if (clean.includes("sizeof") && clean.includes("/")) {
+    const sizeMatch = clean.match(/(?:int|size_t)\s+(\w+)\s*=\s*sizeof\((\w+)\)\s*\/\s*sizeof/);
+    if (sizeMatch) {
+      return `Set ${sizeMatch[1]} to size of array "${sizeMatch[2]}"`;
+    }
+  }
+  
+  const varDeclMultiple = clean.match(/^(?:int|float|double|char|long long|auto)\s+(.*)/);
+  if (varDeclMultiple && !clean.includes("(")) {
+    const decls = varDeclMultiple[1].split(",");
+    const translatedDecls = decls.map(decl => {
+      const parts = decl.split("=");
+      if (parts.length === 2) {
+        return `"${parts[0].trim()}" to ${parts[1].trim()}`;
+      }
+      return `"${decl.trim()}"`;
+    });
+    return `Initialize ${translatedDecls.join(", ")}`;
+  }
+  
+  const funcCallMatch = clean.match(/^(\w+)\s*\((.*)\)$/);
+  if (funcCallMatch && !/^(if|for|while|switch)$/.test(funcCallMatch[1])) {
+    return `Call function "${funcCallMatch[1]}" with (${funcCallMatch[2]})`;
+  }
+  
+  const assignMatch = clean.match(/^(\w+)\s*(=|\+=|-=|\*=|\/=)\s*(.*)/);
+  if (assignMatch) {
+    const varName = assignMatch[1];
+    const op = assignMatch[2];
+    const val = assignMatch[3];
+    if (op === "=") {
+      return `Set ${varName} to ${val}`;
+    } else if (op === "+=") {
+      return `Increase ${varName} by ${val}`;
+    } else if (op === "-=") {
+      return `Decrease ${varName} by ${val}`;
+    } else if (op === "*=") {
+      return `Multiply ${varName} by ${val}`;
+    } else if (op === "/=") {
+      return `Divide ${varName} by ${val}`;
+    }
+  }
+  
+  if (clean.includes("++")) {
+    const varName = clean.replace(/\+/g, "").trim();
+    return `Increment ${varName}`;
+  }
+  if (clean.includes("--")) {
+    const varName = clean.replace(/-/g, "").trim();
+    return `Decrement ${varName}`;
+  }
+  
+  return clean;
+}
+
 function parseCodeToFlow(code, language) {
   let cleanCode = code
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -883,7 +1094,7 @@ function parseCodeToFlow(code, language) {
     }
 
     if (line.startsWith("return") || line.startsWith("exit")) {
-      const text = line.replace(";", "").trim();
+      const text = toNaturalLanguage(line);
       const id = addNode("end", text, line);
       links.push({ from: lastNodeId, to: id });
       steps.push(`Terminate program execution and exit (${text}).`);
@@ -894,9 +1105,9 @@ function parseCodeToFlow(code, language) {
     const ifMatch = line.match(/^if\s*\((.*)\)/);
     if (ifMatch) {
       const cond = ifMatch[1].trim();
-      const id = addNode("decision", `Is ${cond}?`, line);
+      const id = addNode("decision", `Is ${conditionToNaturalLanguage(cond)}?`, line);
       links.push({ from: lastNodeId, to: id });
-      steps.push(`Evaluate branch condition: Is "${cond}"?`);
+      steps.push(`Evaluate branch condition: Is "${conditionToNaturalLanguage(cond)}"?`);
       
       ifStack.push({
         decisionNodeId: id,
@@ -922,9 +1133,9 @@ function parseCodeToFlow(code, language) {
     const forMatch = line.match(/^for\s*\((.*)\)/);
     if (whileMatch || forMatch) {
       const cond = whileMatch ? whileMatch[1].trim() : forMatch[1].split(";")[1]?.trim() || "loop condition";
-      const id = addNode("decision", `Loop: ${cond}`, line);
+      const id = addNode("decision", `Loop: Is ${conditionToNaturalLanguage(cond)}?`, line);
       links.push({ from: lastNodeId, to: id });
-      steps.push(`Check loop condition: ${cond}`);
+      steps.push(`Check loop condition: Is ${conditionToNaturalLanguage(cond)}?`);
       
       loopStack.push({
         loopNodeId: id,
@@ -942,7 +1153,7 @@ function parseCodeToFlow(code, language) {
       } else {
         desc = "Input: Read variable";
       }
-      const text = line.replace(";", "").replace("std::", "").trim();
+      const text = toNaturalLanguage(line);
       const id = addNode("io", text, line);
       links.push({ from: lastNodeId, to: id });
       steps.push(`${desc} ("${text}").`);
@@ -957,7 +1168,7 @@ function parseCodeToFlow(code, language) {
     }
 
     if (line.includes("=") || line.match(/^(int|float|double|char|bool|auto|std::vector|vector)\s+\w+/)) {
-      const text = line.replace(";", "").replace("std::", "").trim();
+      const text = toNaturalLanguage(line);
       const id = addNode("process", text, line);
       links.push({ from: lastNodeId, to: id });
       steps.push(`Process statement: "${text}".`);
@@ -1001,126 +1212,350 @@ function parseCodeToFlow(code, language) {
   return { nodes, links, steps };
 }
 
-function computeLayout(nodes, links) {
-  let currentY = 40;
-  const positions = {};
+function generateMermaidGraph(nodes, links) {
+  let code = "graph TD\n";
   
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    let x = 200;
-    let y = currentY;
+  code += "  %% Node definitions\n";
+  nodes.forEach(node => {
+    let text = escapeMermaidText(node.text);
+    if (node.type === "start") {
+      code += `  ${node.id}([Start])\n`;
+    } else if (node.type === "end") {
+      code += `  ${node.id}([${text}])\n`;
+    } else if (node.type === "decision") {
+      code += `  ${node.id}{"${text}"}\n`;
+    } else if (node.type === "io") {
+      code += `  ${node.id}[/"${text}"/]\n`;
+    } else if (node.type === "process") {
+      if (node.text === "Merge Path") {
+        code += `  ${node.id}((( )))\n`;
+      } else {
+        code += `  ${node.id}["${text}"]\n`;
+      }
+    }
+  });
+
+  code += "\n  %% Link definitions\n";
+  links.forEach(link => {
+    const labelText = link.label ? `|${link.label}|` : "";
+    code += `  ${link.from} -->${labelText} ${link.to}\n`;
+  });
+
+  code += "\n  %% Styling classes\n";
+  code += "  classDef startNode fill:#151b2b,stroke:#00CEC9,stroke-width:2px,color:#e4e8f1,font-weight:bold;\n";
+  code += "  classDef endNode fill:#151b2b,stroke:#FF6B6B,stroke-width:2px,color:#e4e8f1,font-weight:bold;\n";
+  code += "  classDef decisionNode fill:#1a2137,stroke:#6C5CE7,stroke-width:2px,color:#e4e8f1;\n";
+  code += "  classDef ioNode fill:#151b2b,stroke:#00B894,stroke-width:2px,color:#e4e8f1;\n";
+  code += "  classDef processNode fill:#151b2b,stroke:#74B9FF,stroke-width:1.5px,color:#e4e8f1;\n";
+  code += "  classDef mergeNode fill:#5a6380,stroke:none,color:#e4e8f1;\n";
+  
+  nodes.forEach(node => {
+    if (node.type === "start") {
+      code += `  class ${node.id} startNode;\n`;
+    } else if (node.type === "end") {
+      code += `  class ${node.id} endNode;\n`;
+    } else if (node.type === "decision") {
+      code += `  class ${node.id} decisionNode;\n`;
+    } else if (node.type === "io") {
+      code += `  class ${node.id} ioNode;\n`;
+    } else if (node.type === "process") {
+      if (node.text === "Merge Path") {
+        code += `  class ${node.id} mergeNode;\n`;
+      } else {
+        code += `  class ${node.id} processNode;\n`;
+      }
+    }
+  });
+
+  return code;
+}
+
+function escapeMermaidText(text) {
+  if (!text) return "";
+  return text
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function cleanPrintStatement(line) {
+  // Try to match printf(format, args...)
+  const printfMatch = line.match(/printf\s*\(\s*"((?:\\.|[^"\\])*)"\s*(?:,\s*(.*))?\)/);
+  if (printfMatch) {
+    const formatStr = printfMatch[1];
+    const argsStr = printfMatch[2] ? printfMatch[2].trim() : "";
     
-    positions[node.id] = { x, y };
+    if (!argsStr) {
+      return `"${formatStr}"`;
+    }
     
-    if (node.type === "decision") {
-      currentY += 100;
-    } else {
-      currentY += 80;
+    // Split arguments by comma, keeping track of parenthesis/bracket depth
+    const args = [];
+    let current = "";
+    let depth = 0;
+    for (let i = 0; i < argsStr.length; i++) {
+      const char = argsStr[i];
+      if (char === '(' || char === '{' || char === '[') depth++;
+      else if (char === ')' || char === '}' || char === ']') depth--;
+      
+      if (char === ',' && depth === 0) {
+        args.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    if (current.trim()) {
+      args.push(current.trim());
+    }
+    
+    // Replace C format specifiers: %d, %2d, %lld, %s, %lf, %f, etc.
+    let result = "";
+    const specifierRegex = /%[-+0 #]?\d*(?:\.\d+)?[hlL]*[diuoxXfFcsSpn]/g;
+    
+    let lastIndex = 0;
+    let argIndex = 0;
+    let match;
+    
+    while ((match = specifierRegex.exec(formatStr)) !== null) {
+      // Add the text before the specifier
+      result += formatStr.substring(lastIndex, match.index);
+      // Replace specifier with the corresponding argument
+      if (argIndex < args.length) {
+        result += `" + ${args[argIndex]} + "`;
+        argIndex++;
+      } else {
+        result += match[0];
+      }
+      lastIndex = specifierRegex.lastIndex;
+    }
+    result += formatStr.substring(lastIndex);
+    
+    // Wrap and clean up empty strings
+    let output = `"${result}"`
+      .replace(/^"" \+ /, "")
+      .replace(/ \+ ""$/, "")
+      .replace(/ \+ "" \+ /g, " + ");
+      
+    return output;
+  }
+  
+  // Try to match std::cout << ...
+  if (line.includes("cout")) {
+    let clean = line.replace(/std::cout|cout|<<|;|\s*std::endl|endl/g, " ").trim();
+    const parts = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < clean.length; i++) {
+      const char = clean[i];
+      if (char === '"' && (i === 0 || clean[i-1] !== '\\')) {
+        inQuotes = !inQuotes;
+        current += char;
+      } else if (char === ' ' && !inQuotes) {
+        if (current.trim()) {
+          parts.push(current.trim());
+          current = "";
+        }
+      } else {
+        current += char;
+      }
+    }
+    if (current.trim()) {
+      parts.push(current.trim());
+    }
+    
+    return parts.join(" + ");
+  }
+  
+  // Fallback: extract double-quoted string if any
+  const literalMatch = line.match(/"((?:\\.|[^"\\])*)"/);
+  if (literalMatch) {
+    return `"${literalMatch[1]}"`;
+  }
+  
+  return line;
+}
+
+function parseCodeToPseudocode(code, language) {
+  let cleanCode = code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*/g, "");
+
+  let lines = cleanCode.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  
+  let latex = "\\begin{algorithm}\n";
+  latex += `\\caption{Algorithm for main.${language === 'cpp' ? 'cpp' : 'c'}}\n`;
+  latex += "\\begin{algorithmic}\n";
+  
+  let blockStack = [];
+  let inMain = false;
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    
+    if (line.startsWith("#include") || line.startsWith("using namespace")) {
+      continue;
+    }
+    
+    if (line.match(/^(int|void|float|double|char)\s+main\s*\(/)) {
+      latex += "\\PROCEDURE{Main}{}\n";
+      blockStack.push("procedure");
+      inMain = true;
+      continue;
+    }
+    
+    if (line === "{") {
+      continue;
+    }
+    
+    const forMatch = line.match(/^for\s*\((.*)\)/);
+    const whileMatch = line.match(/^while\s*\((.*)\)/);
+    if (forMatch) {
+      let cond = forMatch[1].trim();
+      let loopRange = cond;
+      const parts = cond.split(";");
+      if (parts.length === 3) {
+        const init = parts[0].replace(/^(int|long|size_t)\s+/, "").trim();
+        const check = parts[1].trim();
+        
+        // Try to parse standard for-loop components to make it look like human pseudocode
+        const initMatch = init.match(/(\w+)\s*=\s*(.*)/);
+        const checkMatch = check.match(/(\w+)\s*(<|<=|>|>=)\s*(.*)/);
+        
+        if (initMatch && checkMatch && initMatch[1] === checkMatch[1]) {
+          const varName = initMatch[1];
+          const startVal = initMatch[2];
+          const op = checkMatch[2];
+          const limit = checkMatch[3];
+          
+          if (op === "<") {
+            const limitMinusOne = isNaN(limit) ? `${limit} - 1` : (parseInt(limit) - 1).toString();
+            loopRange = `${varName} = ${startVal} to ${limitMinusOne}`;
+          } else if (op === "<=") {
+            loopRange = `${varName} = ${startVal} to ${limit}`;
+          } else {
+            loopRange = `${init} to ${check}`;
+          }
+        } else {
+          loopRange = `${init} to ${check}`;
+        }
+      }
+      latex += `\\FOR{${escapeLatexMath(loopRange)}}\n`;
+      blockStack.push("for");
+      continue;
+    }
+    
+    if (whileMatch) {
+      let cond = whileMatch[1].trim();
+      latex += `\\WHILE{${escapeLatexMath(cond)}}\n`;
+      blockStack.push("while");
+      continue;
+    }
+    
+    const ifMatch = line.match(/^if\s*\((.*)\)/);
+    if (ifMatch) {
+      let cond = ifMatch[1].trim();
+      latex += `\\IF{${escapeLatexMath(cond)}}\n`;
+      blockStack.push("if");
+      continue;
+    }
+    
+    if (line.startsWith("else if")) {
+      const cond = line.match(/if\s*\((.*)\)/)?.[1]?.trim() || "condition";
+      latex += `\\ELSIF{${escapeLatexMath(cond)}}\n`;
+      continue;
+    }
+    
+    if (line.startsWith("else")) {
+      latex += "\\ELSE\n";
+      continue;
+    }
+    
+    if (line.startsWith("return") || line.startsWith("exit")) {
+      let val = line.replace(/^(return|exit)/, "").replace(";", "").trim();
+      latex += `\\RETURN ${escapeLatexMath(val)}\n`;
+      continue;
+    }
+    
+    if (line === "}" || line.startsWith("}")) {
+      if (blockStack.length > 0) {
+        let blockType = blockStack.pop();
+        if (blockType === "procedure") {
+          latex += "\\ENDPROCEDURE\n";
+          inMain = false;
+        } else if (blockType === "if") {
+          latex += "\\ENDIF\n";
+        } else if (blockType === "for") {
+          latex += "\\ENDFOR\n";
+        } else if (blockType === "while") {
+          latex += "\\ENDWHILE\n";
+        }
+      }
+      continue;
+    }
+    
+    if (inMain) {
+      const isPrint = line.includes("printf") || line.includes("cout");
+      const isScan = line.includes("scanf") || line.includes("cin");
+      
+      if (isPrint) {
+        const content = cleanPrintStatement(line);
+        latex += `\\PRINT{${escapeLatexText(content)}}\n`;
+      } else if (isScan) {
+        let content = line.replace(/scanf|std::cin|cin|<<|>>|;|\(|\)|&/g, "").trim();
+        latex += `\\READ{${escapeLatexMath(content)}}\n`;
+      } else {
+        let stmt = line.replace(";", "").trim();
+        stmt = stmt.replace(/\s*=\s*/, " \\gets ");
+        stmt = stmt.replace(/^(int|long|float|double|char|bool|auto|std::vector|vector)\s+/, "");
+        latex += `\\STATE $${escapeLatexMath(stmt)}$\n`;
+      }
     }
   }
   
-  links.forEach(link => {
-    const fromNode = nodes.find(n => n.id === link.from);
-    if (fromNode) {
-      if (fromNode.type === "decision") {
-        if (link.label === "yes" || !link.label) {
-          positions[link.to].x = 100;
-        } else if (link.label === "no") {
-          positions[link.to].x = 300;
-        }
-      }
-    }
-  });
+  while (blockStack.length > 0) {
+    let blockType = blockStack.pop();
+    if (blockType === "procedure") latex += "\\ENDPROCEDURE\n";
+    else if (blockType === "if") latex += "\\ENDIF\n";
+    else if (blockType === "for") latex += "\\ENDFOR\n";
+    else if (blockType === "while") latex += "\\ENDWHILE\n";
+  }
   
-  nodes.forEach(node => {
-    if (node.text === "Merge Path") {
-      positions[node.id].x = 200;
-    }
-  });
-  
-  return positions;
+  latex += "\\end{algorithmic}\n";
+  latex += "\\end{algorithm}";
+  return latex;
 }
 
-function renderFlowchartToSvg(analysis) {
-  const { nodes, links } = analysis;
-  const positions = computeLayout(nodes, links);
+function escapeLatexMath(str) {
+  if (!str) return "";
+  return str
+    .replace(/&/g, "\\&")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_")
+    .replace(/&&/g, " \\text{ and } ")
+    .replace(/\|\|/g, " \\text{ or } ")
+    .replace(/!=/g, " \\ne ")
+    .replace(/<=/g, " \\le ")
+    .replace(/>=/g, " \\ge ")
+    .replace(/==/g, " = ")
+    .replace(/</g, " < ")
+    .replace(/>/g, " > ");
+}
+
+function escapeLatexText(str) {
+  if (!str) return "";
+  let cleanStr = str
+    .replace(/\\n/g, "")
+    .replace(/\\t/g, "  ")
+    .replace(/\\"/g, '"');
   
-  let maxY = 100;
-  Object.values(positions).forEach(pos => {
-    if (pos.y > maxY) maxY = pos.y;
-  });
-  const svgHeight = maxY + 80;
-  
-  let html = `<svg class="flowchart-svg" width="400" height="${svgHeight}" viewBox="0 0 400 ${svgHeight}">`;
-  
-  html += `
-    <defs>
-      <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-marker" />
-      </marker>
-    </defs>
-  `;
-  
-  links.forEach(link => {
-    const fromPos = positions[link.from];
-    const toPos = positions[link.to];
-    
-    if (fromPos && toPos) {
-      let startX = fromPos.x;
-      let startY = fromPos.y;
-      let endX = toPos.x;
-      let endY = toPos.y;
-      
-      let d = "";
-      if (startX === endX) {
-        d = `M ${startX} ${startY + 20} L ${endX} ${endY - 20}`;
-      } else {
-        const midY = (startY + endY) / 2;
-        d = `M ${startX} ${startY + 20} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY - 20}`;
-      }
-      
-      html += `<path d="${d}" class="flow-line" />`;
-      
-      if (link.label) {
-        const labelX = (startX + endX) / 2;
-        const labelY = (startY + endY) / 2 - 8;
-        html += `<text class="flow-line-label" x="${labelX}" y="${labelY}">${link.label}</text>`;
-      }
-    }
-  });
-  
-  nodes.forEach(node => {
-    const pos = positions[node.id];
-    if (!pos) return;
-    
-    const x = pos.x;
-    const y = pos.y;
-    
-    if (node.type === "start" || node.type === "end") {
-      html += `<ellipse cx="${x}" cy="${y}" rx="40" ry="20" class="flow-node flow-${node.type}" />`;
-    } else if (node.type === "decision") {
-      const points = `${x},${y-30} ${x+65},${y} ${x},${y+30} ${x-65},${y}`;
-      html += `<polygon points="${points}" class="flow-node flow-decision" />`;
-    } else if (node.type === "io") {
-      const points = `${x-45},${y-20} ${x+55},${y-20} ${x+45},${y+20} ${x-55},${y+20}`;
-      html += `<polygon points="${points}" class="flow-node flow-io" />`;
-    } else {
-      if (node.text === "Merge Path") {
-        html += `<circle cx="${x}" cy="${y}" r="6" class="flow-node flow-process" style="fill:var(--text-muted); stroke:none;" />`;
-        return;
-      }
-      html += `<rect x="${x-60}" y="${y-20}" width="120" height="40" rx="6" ry="6" class="flow-node flow-process" />`;
-    }
-    
-    if (node.text !== "Merge Path") {
-      let displayTxt = node.text;
-      if (displayTxt.length > 15) {
-        displayTxt = displayTxt.substring(0, 13) + "...";
-      }
-      html += `<text x="${x}" y="${y}" class="flow-node-text">${displayTxt}</text>`;
-    }
-  });
-  
-  html += `</svg>`;
-  return html;
+  return cleanStr
+    .replace(/\\/g, "\\backslash ")
+    .replace(/&/g, "\\&")
+    .replace(/%/g, "\\%")
+    .replace(/\$/g, "\\$")
+    .replace(/#/g, "\\#")
+    .replace(/_/g, "\\_")
+    .replace(/{/g, "\\{")
+    .replace(/}/g, "\\}");
 }
