@@ -418,14 +418,20 @@ async function initSDK() {
     state.projectDir = new Directory();
 
     dom.loaderStatus.textContent = "Loading local Clang compiler…";
-    logToConsole("[Compiler] Fetching local clang.webc archive (105MB)...", "info");
+    logToConsole("[Compiler] Fetching compressed local clang.webc.gz archive (32MB)...", "info");
     const fetchStart = performance.now();
-    const response = await fetch("clang.webc", { cache: "no-store" });
+    const response = await fetch("clang.webc.gz", { cache: "no-store" });
     if (!response.ok) {
-      throw new Error(`Failed to fetch clang.webc: ${response.statusText}`);
+      throw new Error(`Failed to fetch clang.webc.gz: ${response.statusText}`);
     }
-    const arrayBuffer = await response.arrayBuffer();
-    logToConsole(`[Compiler] Download completed: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB in ${(performance.now() - fetchStart).toFixed(1)}ms`, "success");
+    
+    logToConsole("[Compiler] Decompressing archive in memory...", "info");
+    const decompressStart = performance.now();
+    const decompressedStream = response.body.pipeThrough(new DecompressionStream("gzip"));
+    const decompressedResponse = new Response(decompressedStream);
+    const arrayBuffer = await decompressedResponse.arrayBuffer();
+    
+    logToConsole(`[Compiler] Download and decompression completed: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB in ${(performance.now() - fetchStart).toFixed(1)}ms (decompression took ${(performance.now() - decompressStart).toFixed(1)}ms)`, "success");
 
     logToConsole("[Compiler] Instantiating Clang compiler package (parsing WebC container)...", "info");
     const parseStart = performance.now();
