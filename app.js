@@ -3,7 +3,7 @@
 // Application Logic
 // =============================================
 
-import { init, Wasmer, Directory } from "./node_modules/@wasmer/sdk/dist/index.mjs";
+import { init, Wasmer, Directory } from "https://cdn.jsdelivr.net/npm/@wasmer/sdk@0.10.0/dist/index.mjs";
 
 // Initialize Mermaid with dark theme variables matching our UI
 if (typeof mermaid !== "undefined") {
@@ -686,7 +686,7 @@ function switchTab(tab) {
 }
 
 function setupEditor(callback) {
-  require.config({ paths: { vs: './node_modules/monaco-editor/min/vs' } });
+  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } });
   require(['vs/editor/editor.main'], function () {
     state.editor = monaco.editor.create(dom.editorContainer, {
       value: EXAMPLES[0].code,

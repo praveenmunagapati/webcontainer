@@ -2,6 +2,7 @@
 <html lang="en">
 
 <head>
+  <script src="coi-serviceworker.js"></script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description"
@@ -11,9 +12,9 @@
   <!-- Google Fonts (Local) -->
   <link rel="stylesheet" href="fonts/fonts.css">
 
-  <!-- Third-party styles (KaTeX & Pseudocode) -->
-  <link rel="stylesheet" href="node_modules/katex/dist/katex.min.css">
-  <link rel="stylesheet" href="node_modules/pseudocode/build/pseudocode.min.css">
+  <!-- Third-party styles (KaTeX & Pseudocode - CDN) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pseudocode@2.4.1/build/pseudocode.min.css">
 
   <link rel="stylesheet" href="style.css">
 </head>
@@ -234,13 +235,13 @@
     </div>
   </div>
 
-  <!-- Third-party libraries (KaTeX, Pseudocode, Mermaid) -->
-  <script src="node_modules/katex/dist/katex.min.js"></script>
-  <script src="node_modules/pseudocode/build/pseudocode.min.js"></script>
-  <script src="node_modules/mermaid/dist/mermaid.min.js"></script>
+  <!-- Third-party libraries (KaTeX, Pseudocode, Mermaid - CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pseudocode@2.4.1/build/pseudocode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"></script>
 
-  <!-- Monaco Editor Loader (Local) -->
-  <script src="node_modules/monaco-editor/min/vs/loader.js"></script>
+  <!-- Monaco Editor Loader (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 
