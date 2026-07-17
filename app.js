@@ -39,6 +39,8 @@ const state = {
   projectDir: null,
   language: "c",
   activeCompileInstance: null,
+  network: null,
+  savedValue: "",
 };
 
 // ---- DOM refs ----
@@ -65,6 +67,7 @@ const dom = {
   btnRun:         $("#btn-run"),
   btnCompileRun:  $("#btn-compile-run"),
   btnNew:         $("#btn-new"),
+  btnSave:        $("#btn-save"),
   btnExamples:    $("#btn-examples"),
   btnClearConsole:$("#btn-clear-console"),
   modalClose:     $("#modal-close"),
@@ -75,6 +78,7 @@ const dom = {
   algorithmOutput:$("#algorithm-output"),
   flowchartOutput:$("#flowchart-output"),
   selectLanguage: $("#select-language"),
+  statusLang:     $("#status-lang"),
 };
 
 // ---- Examples ----
@@ -689,13 +693,22 @@ function switchTab(tab) {
   dom.programOutput.classList.toggle("active", tab === "output");
   dom.algorithmOutput.classList.toggle("active", tab === "algorithm");
   dom.flowchartOutput.classList.toggle("active", tab === "flowchart");
+  
+  if (tab === "flowchart" && state.network) {
+    setTimeout(() => {
+      state.network.setSize("100%", "100%");
+      state.network.redraw();
+      state.network.fit();
+    }, 50);
+  }
 }
 
 function setupEditor(callback) {
   require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } });
   require(['vs/editor/editor.main'], function () {
+    const savedCode = localStorage.getItem('cforge_code_c');
     state.editor = monaco.editor.create(dom.editorContainer, {
-      value: EXAMPLES[0].code,
+      value: savedCode || EXAMPLES[0].code,
       language: 'c',
       theme: 'vs-dark',
       automaticLayout: true,
@@ -715,10 +728,10 @@ function setupEditor(callback) {
     });
 
     // Track unsaved changes
-    let savedValue = state.editor.getValue();
+    state.savedValue = state.editor.getValue();
     let renderTimeout;
     state.editor.onDidChangeModelContent(() => {
-      const changed = state.editor.getValue() !== savedValue;
+      const changed = state.editor.getValue() !== state.savedValue;
       dom.unsavedDot.style.display = changed ? "inline-block" : "none";
       
       clearTimeout(renderTimeout);
@@ -728,6 +741,7 @@ function setupEditor(callback) {
     });
 
     // Keyboard shortcuts
+    state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveCode());
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, () => compile());
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runWasm());
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => compileAndRun());
@@ -740,34 +754,93 @@ function setupEditor(callback) {
 function setupResize() {
   const handle = $("#resize-handle");
   const editorPanel = $(".editor-panel");
+  const outputPanel = $(".output-panel");
   const mainContent = $(".main-content");
   let isResizing = false;
 
-  handle.addEventListener("mousedown", (e) => {
+  function isVerticalLayout() {
+    return window.getComputedStyle(mainContent).flexDirection === "column";
+  }
+
+  function startResize(e) {
     isResizing = true;
     handle.classList.add("active");
-    document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
+    document.body.style.cursor = isVerticalLayout() ? "row-resize" : "col-resize";
     e.preventDefault();
-  });
+  }
 
-  document.addEventListener("mousemove", (e) => {
+  function doResize(clientX, clientY) {
     if (!isResizing) return;
     const rect = mainContent.getBoundingClientRect();
-    const ratio = ((e.clientX - rect.left) / rect.width) * 100;
-    const clamped = Math.min(Math.max(ratio, 25), 80);
-    editorPanel.style.flex = `0 0 ${clamped}%`;
-    state.editor.layout();
-  });
 
-  document.addEventListener("mouseup", () => {
+    if (isVerticalLayout()) {
+      const ratio = ((clientY - rect.top) / rect.height) * 100;
+      const clamped = Math.min(Math.max(ratio, 20), 80);
+      editorPanel.style.flex = `0 0 ${clamped}%`;
+      outputPanel.style.flex = `1 1 0%`;
+    } else {
+      const ratio = ((clientX - rect.left) / rect.width) * 100;
+      const clamped = Math.min(Math.max(ratio, 25), 80);
+      editorPanel.style.flex = `0 0 ${clamped}%`;
+    }
+
+    state.editor.layout();
+    if (state.network) {
+      state.network.setSize("100%", "100%");
+      state.network.redraw();
+    }
+  }
+
+  function endResize() {
     if (isResizing) {
       isResizing = false;
       handle.classList.remove("active");
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       state.editor.layout();
+      if (state.network) {
+        state.network.setSize("100%", "100%");
+        state.network.redraw();
+        state.network.fit();
+      }
     }
+  }
+
+  // Mouse events
+  handle.addEventListener("mousedown", startResize);
+  document.addEventListener("mousemove", (e) => doResize(e.clientX, e.clientY));
+  document.addEventListener("mouseup", endResize);
+
+  // Touch events for mobile
+  handle.addEventListener("touchstart", (e) => {
+    startResize(e);
+  }, { passive: false });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!isResizing) return;
+    const touch = e.touches[0];
+    doResize(touch.clientX, touch.clientY);
+    e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener("touchend", endResize);
+
+  // Re-layout editor on window resize
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      // Reset flex properties to defaults on layout change
+      editorPanel.style.flex = "";
+      outputPanel.style.flex = "";
+      if (state.editor) state.editor.layout();
+      if (state.network) {
+        state.network.setSize("100%", "100%");
+        state.network.redraw();
+        state.network.fit();
+      }
+    }, 150);
   });
 }
 
@@ -786,12 +859,22 @@ function renderExamples() {
   ).join("");
 }
 
+function saveCode() {
+  const code = state.editor.getValue();
+  state.savedValue = code;
+  localStorage.setItem('cforge_code_' + state.language, code);
+  dom.unsavedDot.style.display = "none";
+  logToConsole("File saved to browser local storage.", "success");
+}
+
 function setupExamples() {
   dom.examplesList.addEventListener("click", (e) => {
     const card = e.target.closest(".example-card");
     if (!card) return;
     const idx = parseInt(card.dataset.index);
     state.editor.setValue(EXAMPLES[idx].code);
+    state.savedValue = EXAMPLES[idx].code;
+    dom.unsavedDot.style.display = "none";
     dom.examplesModal.classList.add("hidden");
     state.compiledBinary = null;
     setButtonStates(false, false);
@@ -807,12 +890,15 @@ function bindEvents() {
   dom.btnCompile.addEventListener("click", compile);
   dom.btnRun.addEventListener("click", runWasm);
   dom.btnCompileRun.addEventListener("click", compileAndRun);
+  dom.btnSave.addEventListener("click", saveCode);
 
   dom.btnNew.addEventListener("click", () => {
     const defaultCode = state.language === 'cpp'
       ? `#include <iostream>\n\nint main() {\n    \n    return 0;\n}\n`
       : `#include <stdio.h>\n\nint main() {\n    \n    return 0;\n}\n`;
     state.editor.setValue(defaultCode);
+    state.savedValue = defaultCode;
+    dom.unsavedDot.style.display = "none";
     state.compiledBinary = null;
     setButtonStates(false, false);
     dom.statusWasm.style.display = "none";
@@ -839,16 +925,20 @@ function bindEvents() {
     const ext = newLang === 'cpp' ? 'cpp' : 'c';
     dom.tabName.textContent = `main.${ext}`;
     dom.titleFilename.textContent = `main.${ext}`;
+    dom.statusLang.textContent = newLang === 'cpp' ? 'C++ (ISO C++17)' : 'C (ISO C17)';
     
     state.compiledBinary = null;
     setButtonStates(false, false);
     dom.statusWasm.style.display = "none";
     setStatus("Ready", "idle");
     
-    const defaultCode = newLang === 'cpp'
+    const savedCode = localStorage.getItem('cforge_code_' + newLang);
+    const defaultCode = savedCode || (newLang === 'cpp'
       ? `#include <cstdio>\n\nint main() {\n    std::printf("Hello, C++!\\n");\n    return 0;\n}\n`
-      : `#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}\n`;
+      : `#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}\n`);
     state.editor.setValue(defaultCode);
+    state.savedValue = defaultCode;
+    dom.unsavedDot.style.display = "none";
     
     logToConsole(`Switched language to ${newLang === 'cpp' ? 'C++' : 'C'}.`, "info");
     renderFlowchartAndAlgorithm();
@@ -877,6 +967,10 @@ function bindEvents() {
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      e.preventDefault();
+      saveCode();
+    }
     if (e.ctrlKey && e.key === "b") {
       e.preventDefault();
       compile();
@@ -936,21 +1030,8 @@ function renderFlowchartAndAlgorithm() {
       });
     }
     
-    // 2. Render Flowchart using Mermaid
-    const mermaidCode = generateMermaidGraph(analysis.nodes, analysis.links);
-    dom.flowchartOutput.innerHTML = `
-      <div class="mermaid-container" style="display:flex; justify-content:center; align-items:center; min-height:300px; padding:16px; overflow:auto; background:var(--bg-secondary); border:1px solid var(--border-default); border-radius:var(--radius-md);">
-        <pre class="mermaid" id="flowchart-mermaid" style="background:transparent; margin:0; overflow:visible;">
-          ${escapeHtml(mermaidCode)}
-        </pre>
-      </div>
-    `;
-    
-    if (typeof mermaid !== 'undefined') {
-      mermaid.run({
-        nodes: [document.getElementById("flowchart-mermaid")]
-      });
-    }
+    // 2. Render Flowchart using Vis Network
+    renderVisFlowchart(analysis.nodes, analysis.links);
   } catch (err) {
     console.error("Analysis generation error:", err);
   }
@@ -1066,222 +1147,568 @@ function parseCodeToFlow(code, language) {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*/g, "");
 
-  let lines = cleanCode.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-
-  const steps = [];
   const nodes = [];
   const links = [];
+  const steps = [];
+  let nodeCounter = 0;
 
-  nodes.push({ id: "start", type: "start", text: "Start" });
-  steps.push("Start of program execution.");
-
-  let lastNodeId = "start";
-  let ifStack = [];
-  let loopStack = [];
-  let nodeIdCounter = 1;
-
-  function addNode(type, text, rawLine = "") {
-    const id = `node_${nodeIdCounter++}`;
-    nodes.push({ id, type, text, rawLine });
+  function nextId() { return `n${nodeCounter++}`; }
+  function addNode(type, text) {
+    const id = nextId();
+    nodes.push({ id, type, text });
     return id;
   }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  // ---- Low-level helpers ----
+  function findMatchingBrace(str, startIdx) {
+    let depth = 0;
+    for (let i = startIdx; i < str.length; i++) {
+      if (str[i] === '{') depth++;
+      else if (str[i] === '}') { depth--; if (depth === 0) return i; }
+    }
+    return str.length - 1;
+  }
 
-    if (line.match(/^(int|void|float|double|char)\s+main\s*\(/) || line === "{" || line === "}") {
-      if (line === "}" && loopStack.length > 0) {
-        const loop = loopStack.pop();
-        links.push({ from: lastNodeId, to: loop.loopNodeId, label: "repeat" });
-        lastNodeId = loop.loopNodeId;
-        steps.push("Loop iterations completed. Return to check loop condition.");
+  function findMatchingParen(str, startIdx) {
+    let depth = 0;
+    for (let i = startIdx; i < str.length; i++) {
+      if (str[i] === '(') depth++;
+      else if (str[i] === ')') { depth--; if (depth === 0) return i; }
+    }
+    return str.length - 1;
+  }
+
+  function findSemicolon(str, start) {
+    let inStr = false, strCh = '', depth = 0;
+    for (let j = start; j < str.length; j++) {
+      if (!inStr && (str[j] === '"' || str[j] === "'")) { inStr = true; strCh = str[j]; }
+      else if (inStr && str[j] === strCh && str[j - 1] !== '\\') { inStr = false; }
+      else if (!inStr) {
+        if (str[j] === '{' || str[j] === '(') depth++;
+        else if (str[j] === '}' || str[j] === ')') depth--;
+        else if (str[j] === ';' && depth === 0) return j;
       }
-      continue;
     }
+    return -1;
+  }
 
-    if (line.startsWith("return") || line.startsWith("exit")) {
-      const text = toNaturalLanguage(line);
-      const id = addNode("end", text, line);
-      links.push({ from: lastNodeId, to: id });
-      steps.push(`Terminate program execution and exit (${text}).`);
-      lastNodeId = id;
-      continue;
-    }
+  // ---- Extract main() body ----
+  function extractMainBody(src) {
+    const m = src.match(/(int|void)\s+main\s*\(/);
+    if (!m) return null;
+    let idx = m.index + m[0].length - 1; // at the '('
+    const pEnd = findMatchingParen(src, idx);
+    idx = pEnd + 1;
+    while (idx < src.length && /\s/.test(src[idx])) idx++;
+    if (src[idx] !== '{') return null;
+    const bEnd = findMatchingBrace(src, idx);
+    return src.substring(idx + 1, bEnd).trim();
+  }
 
-    const ifMatch = line.match(/^if\s*\((.*)\)/);
-    if (ifMatch) {
-      const cond = ifMatch[1].trim();
-      const id = addNode("decision", `Is ${conditionToNaturalLanguage(cond)}?`, line);
-      links.push({ from: lastNodeId, to: id });
-      steps.push(`Evaluate branch condition: Is "${conditionToNaturalLanguage(cond)}"?`);
-      
-      ifStack.push({
-        decisionNodeId: id,
-        prevNodeId: lastNodeId,
-        yesBranchNodes: [id],
-        noBranchNodes: [],
-        currentBranch: "yes"
-      });
-      lastNodeId = id;
-      continue;
-    }
+  // ---- Tokenize block into structured statements ----
+  function parseBlock(s) {
+    const stmts = [];
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (i >= s.length) break;
+      const rest = s.substring(i);
 
-    if (line.startsWith("else")) {
-      if (ifStack.length > 0) {
-        const top = ifStack[ifStack.length - 1];
-        top.currentBranch = "no";
-        lastNodeId = top.decisionNodeId;
+      // Skip preprocessor and includes
+      if (rest.startsWith('#')) {
+        const nl = s.indexOf('\n', i);
+        i = nl === -1 ? s.length : nl + 1;
+        continue;
       }
-      continue;
-    }
 
-    const whileMatch = line.match(/^while\s*\((.*)\)/);
-    const forMatch = line.match(/^for\s*\((.*)\)/);
-    if (whileMatch || forMatch) {
-      const cond = whileMatch ? whileMatch[1].trim() : forMatch[1].split(";")[1]?.trim() || "loop condition";
-      const id = addNode("decision", `Loop: Is ${conditionToNaturalLanguage(cond)}?`, line);
-      links.push({ from: lastNodeId, to: id });
-      steps.push(`Check loop condition: Is ${conditionToNaturalLanguage(cond)}?`);
-      
-      loopStack.push({
-        loopNodeId: id,
-        entryNodeId: lastNodeId
-      });
-      lastNodeId = id;
-      continue;
-    }
+      // if
+      if (rest.match(/^if\s*\(/)) {
+        const r = parseIfChain(s, i);
+        stmts.push(r.stmt);
+        i = r.end;
+        continue;
+      }
 
-    const isIO = line.includes("printf") || line.includes("scanf") || line.includes("cout") || line.includes("cin");
-    if (isIO) {
-      let desc = "";
-      if (line.includes("printf") || line.includes("cout")) {
-        desc = "Output: Print text";
+      // for
+      if (rest.match(/^for\s*\(/)) {
+        const pStart = s.indexOf('(', i);
+        const pEnd = findMatchingParen(s, pStart);
+        const forExpr = s.substring(pStart + 1, pEnd).trim();
+        i = pEnd + 1;
+        const bodyResult = parseBodyAfterControl(s, i);
+        i = bodyResult.end;
+        const parts = forExpr.split(';');
+        stmts.push({
+          type: 'for',
+          init: (parts[0] || '').trim(),
+          condition: (parts[1] || '').trim(),
+          update: (parts[2] || '').trim(),
+          body: bodyResult.stmts
+        });
+        continue;
+      }
+
+      // while
+      if (rest.match(/^while\s*\(/)) {
+        const pStart = s.indexOf('(', i);
+        const pEnd = findMatchingParen(s, pStart);
+        const cond = s.substring(pStart + 1, pEnd).trim();
+        i = pEnd + 1;
+        const bodyResult = parseBodyAfterControl(s, i);
+        i = bodyResult.end;
+        stmts.push({ type: 'while', condition: cond, body: bodyResult.stmts });
+        continue;
+      }
+
+      // Bare block
+      if (s[i] === '{') {
+        const bEnd = findMatchingBrace(s, i);
+        const inner = parseBlock(s.substring(i + 1, bEnd));
+        stmts.push(...inner);
+        i = bEnd + 1;
+        continue;
+      }
+
+      // Regular statement
+      const semi = findSemicolon(s, i);
+      if (semi === -1) break;
+      const txt = s.substring(i, semi + 1).trim();
+      if (txt && txt !== ';') stmts.push({ type: 'statement', text: txt });
+      i = semi + 1;
+    }
+    return stmts;
+  }
+
+  // Parse body after a control keyword (could be { block } or single statement)
+  function parseBodyAfterControl(s, idx) {
+    while (idx < s.length && /\s/.test(s[idx])) idx++;
+    if (s[idx] === '{') {
+      const bEnd = findMatchingBrace(s, idx);
+      return { stmts: parseBlock(s.substring(idx + 1, bEnd)), end: bEnd + 1 };
+    }
+    // single statement
+    const semi = findSemicolon(s, idx);
+    if (semi === -1) return { stmts: [], end: s.length };
+    const txt = s.substring(idx, semi + 1).trim();
+    return { stmts: txt && txt !== ';' ? [{ type: 'statement', text: txt }] : [], end: semi + 1 };
+  }
+
+  // Parse if / else-if / else chain
+  function parseIfChain(s, startIdx) {
+    let i = startIdx;
+    // skip "if"
+    i += 2;
+    while (i < s.length && /\s/.test(s[i])) i++;
+    const pEnd = findMatchingParen(s, i);
+    const cond = s.substring(i + 1, pEnd).trim();
+    i = pEnd + 1;
+    const bodyResult = parseBodyAfterControl(s, i);
+    i = bodyResult.end;
+
+    // Check for else
+    let savedI = i;
+    while (i < s.length && /\s/.test(s[i])) i++;
+    let elseBody = null;
+    if (s.substring(i).startsWith('else')) {
+      i += 4; // skip 'else'
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (s.substring(i).match(/^if\s*\(/)) {
+        // else if → wrap nested if in the else body
+        const nested = parseIfChain(s, i);
+        elseBody = [nested.stmt];
+        i = nested.end;
       } else {
-        desc = "Input: Read variable";
+        const elseResult = parseBodyAfterControl(s, i);
+        elseBody = elseResult.stmts;
+        i = elseResult.end;
       }
-      const text = toNaturalLanguage(line);
-      const id = addNode("io", text, line);
-      links.push({ from: lastNodeId, to: id });
-      steps.push(`${desc} ("${text}").`);
-      
-      if (ifStack.length > 0) {
-        const top = ifStack[ifStack.length - 1];
-        if (top.currentBranch === "yes") top.yesBranchNodes.push(id);
-        else top.noBranchNodes.push(id);
-      }
-      lastNodeId = id;
-      continue;
+    } else {
+      i = savedI; // no else, revert
     }
 
-    if (line.includes("=") || line.match(/^(int|float|double|char|bool|auto|std::vector|vector)\s+\w+/)) {
-      const text = toNaturalLanguage(line);
-      const id = addNode("process", text, line);
-      links.push({ from: lastNodeId, to: id });
-      steps.push(`Process statement: "${text}".`);
-      
-      if (ifStack.length > 0) {
-        const top = ifStack[ifStack.length - 1];
-        if (top.currentBranch === "yes") top.yesBranchNodes.push(id);
-        else top.noBranchNodes.push(id);
-      }
-      lastNodeId = id;
-      continue;
-    }
+    return {
+      stmt: { type: 'if', condition: cond, body: bodyResult.stmts, elseBody },
+      end: i
+    };
   }
 
-  if (ifStack.length > 0) {
-    const cond = ifStack.pop();
-    const mergeId = addNode("process", "Merge Path");
-    
-    if (cond.yesBranchNodes.length > 0) {
-      links.push({ from: cond.yesBranchNodes[cond.yesBranchNodes.length - 1], to: mergeId });
-    } else {
-      links.push({ from: cond.decisionNodeId, to: mergeId, label: "yes" });
-    }
-    
-    if (cond.noBranchNodes.length > 0) {
-      links.push({ from: cond.noBranchNodes[cond.noBranchNodes.length - 1], to: mergeId });
-    } else {
-      links.push({ from: cond.decisionNodeId, to: mergeId, label: "no" });
-    }
-    
-    lastNodeId = mergeId;
-    steps.push("Branch execution paths merge back to main line.");
+  // ---- Classify a simple statement ----
+  function classifyStmt(text) {
+    if (/printf|scanf|cout|cin|puts|gets/.test(text)) return 'io';
+    if (/^return\b/.test(text.trim()) || /^exit\s*\(/.test(text.trim())) return 'end';
+    return 'process';
   }
 
-  if (lastNodeId !== "start" && !nodes.find(n => n.id === lastNodeId && n.type === "end")) {
-    const endId = addNode("end", "End");
-    links.push({ from: lastNodeId, to: endId });
-    steps.push("End of program execution.");
+  // ---- Build flowchart nodes/links from parsed statements ----
+  // Returns the last node id in this chain
+  function buildFlow(stmts, prevId) {
+    let lastId = prevId;
+
+    for (const stmt of stmts) {
+      if (stmt.type === 'statement') {
+        const cls = classifyStmt(stmt.text);
+        const label = toNaturalLanguage(stmt.text);
+        const id = addNode(cls, label);
+        links.push({ from: lastId, to: id });
+        lastId = id;
+
+      } else if (stmt.type === 'if') {
+        // Decision diamond
+        const condText = `Is ${conditionToNaturalLanguage(stmt.condition)}?`;
+        const condId = addNode('decision', condText);
+        links.push({ from: lastId, to: condId });
+
+        // Yes branch
+        if (stmt.body.length > 0) {
+          const yesEnd = buildFlow(stmt.body, condId);
+          // Label the first link from condId (the Yes path)
+          for (const l of links) {
+            if (l.from === condId && !l.label) { l.label = 'Yes'; break; }
+          }
+          // Merge point
+          const mergeId = addNode('process', 'Merge Path');
+          links.push({ from: yesEnd, to: mergeId });
+
+          if (stmt.elseBody && stmt.elseBody.length > 0) {
+            const noEnd = buildFlow(stmt.elseBody, condId);
+            for (const l of links) {
+              if (l.from === condId && !l.label) { l.label = 'No'; break; }
+            }
+            links.push({ from: noEnd, to: mergeId });
+          } else {
+            links.push({ from: condId, to: mergeId, label: 'No' });
+          }
+          lastId = mergeId;
+        } else {
+          // Empty if body – unlikely but handle gracefully
+          const mergeId = addNode('process', 'Merge Path');
+          links.push({ from: condId, to: mergeId, label: 'Yes' });
+          links.push({ from: condId, to: mergeId, label: 'No' });
+          lastId = mergeId;
+        }
+
+      } else if (stmt.type === 'for') {
+        // Init statement
+        if (stmt.init) {
+          const initLabel = toNaturalLanguage(stmt.init + ';');
+          const initId = addNode('process', initLabel);
+          links.push({ from: lastId, to: initId });
+          lastId = initId;
+        }
+
+        // Condition diamond
+        const condText = stmt.condition
+          ? `Is ${conditionToNaturalLanguage(stmt.condition)}?`
+          : 'Loop condition?';
+        const condId = addNode('decision', condText);
+        links.push({ from: lastId, to: condId });
+
+        // Body (Yes branch)
+        if (stmt.body.length > 0) {
+          const bodyEnd = buildFlow(stmt.body, condId);
+          for (const l of links) {
+            if (l.from === condId && !l.label) { l.label = 'Yes'; break; }
+          }
+
+          // Update step
+          if (stmt.update) {
+            const updateLabel = toNaturalLanguage(stmt.update + ';');
+            const updateId = addNode('process', updateLabel);
+            links.push({ from: bodyEnd, to: updateId });
+            links.push({ from: updateId, to: condId });
+          } else {
+            links.push({ from: bodyEnd, to: condId });
+          }
+        } else {
+          links.push({ from: condId, to: condId, label: 'Yes' });
+        }
+
+        // No exit
+        const exitId = addNode('process', 'Merge Path');
+        links.push({ from: condId, to: exitId, label: 'No' });
+        lastId = exitId;
+
+      } else if (stmt.type === 'while') {
+        const condText = `Is ${conditionToNaturalLanguage(stmt.condition)}?`;
+        const condId = addNode('decision', condText);
+        links.push({ from: lastId, to: condId });
+
+        if (stmt.body.length > 0) {
+          const bodyEnd = buildFlow(stmt.body, condId);
+          for (const l of links) {
+            if (l.from === condId && !l.label) { l.label = 'Yes'; break; }
+          }
+          links.push({ from: bodyEnd, to: condId });
+        } else {
+          links.push({ from: condId, to: condId, label: 'Yes' });
+        }
+
+        const exitId = addNode('process', 'Merge Path');
+        links.push({ from: condId, to: exitId, label: 'No' });
+        lastId = exitId;
+      }
+    }
+    return lastId;
+  }
+
+  // ---- Drive ----
+  const startId = addNode('start', 'Start');
+
+  const mainBody = extractMainBody(cleanCode);
+  if (mainBody) {
+    const stmts = parseBlock(mainBody);
+    const lastId = buildFlow(stmts, startId);
+
+    // End node (if the code didn't already end with return)
+    const hasEnd = nodes.some(n => n.type === 'end');
+    if (!hasEnd) {
+      const endId = addNode('end', 'End');
+      links.push({ from: lastId, to: endId });
+    }
+  } else {
+    addNode('end', 'End');
+    links.push({ from: startId, to: 'n1' });
   }
 
   return { nodes, links, steps };
 }
 
-function generateMermaidGraph(nodes, links) {
-  let code = "graph TD\n";
-  
-  code += "  %% Node definitions\n";
-  nodes.forEach(node => {
-    let text = escapeMermaidText(node.text);
-    if (node.type === "start") {
-      code += `  ${node.id}([Start])\n`;
-    } else if (node.type === "end") {
-      code += `  ${node.id}([${text}])\n`;
-    } else if (node.type === "decision") {
-      code += `  ${node.id}{"${text}"}\n`;
-    } else if (node.type === "io") {
-      code += `  ${node.id}[/"${text}"/]\n`;
-    } else if (node.type === "process") {
-      if (node.text === "Merge Path") {
-        code += `  ${node.id}((( )))\n`;
-      } else {
-        code += `  ${node.id}["${text}"]\n`;
-      }
+function wrapText(text, maxChars = 20) {
+  const words = text.split(" ");
+  let lines = [];
+  let currentLine = "";
+  for (let word of words) {
+    if ((currentLine + " " + word).trim().length <= maxChars) {
+      currentLine = (currentLine + " " + word).trim();
+    } else {
+      if (currentLine) lines.push(currentLine);
+      currentLine = word;
     }
-  });
-
-  code += "\n  %% Link definitions\n";
-  links.forEach(link => {
-    const labelText = link.label ? `|${link.label}|` : "";
-    code += `  ${link.from} -->${labelText} ${link.to}\n`;
-  });
-
-  code += "\n  %% Styling classes\n";
-  code += "  classDef startNode fill:#151b2b,stroke:#00CEC9,stroke-width:2px,color:#e4e8f1,font-weight:bold;\n";
-  code += "  classDef endNode fill:#151b2b,stroke:#FF6B6B,stroke-width:2px,color:#e4e8f1,font-weight:bold;\n";
-  code += "  classDef decisionNode fill:#1a2137,stroke:#6C5CE7,stroke-width:2px,color:#e4e8f1;\n";
-  code += "  classDef ioNode fill:#151b2b,stroke:#00B894,stroke-width:2px,color:#e4e8f1;\n";
-  code += "  classDef processNode fill:#151b2b,stroke:#74B9FF,stroke-width:1.5px,color:#e4e8f1;\n";
-  code += "  classDef mergeNode fill:#5a6380,stroke:none,color:#e4e8f1;\n";
-  
-  nodes.forEach(node => {
-    if (node.type === "start") {
-      code += `  class ${node.id} startNode;\n`;
-    } else if (node.type === "end") {
-      code += `  class ${node.id} endNode;\n`;
-    } else if (node.type === "decision") {
-      code += `  class ${node.id} decisionNode;\n`;
-    } else if (node.type === "io") {
-      code += `  class ${node.id} ioNode;\n`;
-    } else if (node.type === "process") {
-      if (node.text === "Merge Path") {
-        code += `  class ${node.id} mergeNode;\n`;
-      } else {
-        code += `  class ${node.id} processNode;\n`;
-      }
-    }
-  });
-
-  return code;
+  }
+  if (currentLine) lines.push(currentLine);
+  return lines.join("\n");
 }
 
-function escapeMermaidText(text) {
-  if (!text) return "";
-  return text
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+function createSvgNodeUrl(type, text, colorBorder, colorBg) {
+  const lines = wrapText(text, 22).split("\n");
+  const lineCount = lines.length;
+  const maxLineLength = Math.max(...lines.map(l => l.length));
+  
+  const charWidth = 7.5;
+  const lineHeight = 18;
+  
+  const textWidth = maxLineLength * charWidth;
+  const textHeight = lineCount * lineHeight;
+  
+  let width, height;
+  let shapeMarkup = "";
+  
+  if (type === 'start' || type === 'end') {
+    // capsule / rounded oval shape
+    width = Math.max(110, textWidth + 50);
+    height = Math.max(46, textHeight + 24);
+    const rx = height / 2;
+    shapeMarkup = `<rect x="2" y="2" width="${width - 4}" height="${height - 4}" rx="${rx}" ry="${rx}" fill="${colorBg}" stroke="${colorBorder}" stroke-width="2"/>`;
+  } else if (type === 'decision') {
+    // diamond shape
+    const pad = Math.max(120, textWidth + textHeight + 40);
+    width = pad;
+    height = pad;
+    const halfW = width / 2;
+    const halfH = height / 2;
+    shapeMarkup = `<polygon points="${halfW},2 ${width-2},${halfH} ${halfW},${height-2} 2,${halfH}" fill="${colorBg}" stroke="${colorBorder}" stroke-width="2"/>`;
+  } else if (type === 'io') {
+    // parallelogram shape (skewed rectangle)
+    width = Math.max(140, textWidth + 60);
+    height = Math.max(50, textHeight + 24);
+    const skew = 18;
+    shapeMarkup = `<polygon points="${skew},2 ${width-2},2 ${width-skew-2},${height-2} 2,${height-2}" fill="${colorBg}" stroke="${colorBorder}" stroke-width="2"/>`;
+  } else if (type === 'process') {
+    // process rectangle
+    width = Math.max(120, textWidth + 36);
+    height = Math.max(50, textHeight + 24);
+    shapeMarkup = `<rect x="2" y="2" width="${width - 4}" height="${height - 4}" rx="6" ry="6" fill="${colorBg}" stroke="${colorBorder}" stroke-width="2"/>`;
+  } else {
+    // fallback process rectangle
+    width = Math.max(120, textWidth + 36);
+    height = Math.max(50, textHeight + 24);
+    shapeMarkup = `<rect x="2" y="2" width="${width - 4}" height="${height - 4}" rx="6" ry="6" fill="${colorBg}" stroke="${colorBorder}" stroke-width="2"/>`;
+  }
+
+  let textMarkup = "";
+  const startY = (height - textHeight) / 2 + 13;
+  lines.forEach((line, idx) => {
+    const y = startY + idx * lineHeight;
+    textMarkup += `<text x="50%" y="${y}" text-anchor="middle" fill="#e4e8f1" font-family="Inter, system-ui, -apple-system, sans-serif" font-size="12" font-weight="500">${escapeHtml(line)}</text>`;
+  });
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${shapeMarkup}${textMarkup}</svg>`;
+  
+  return {
+    url: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg),
+    width,
+    height
+  };
+}
+
+function renderVisFlowchart(nodes, links) {
+  if (typeof vis === 'undefined') {
+    dom.flowchartOutput.innerHTML = `
+      <div class="tab-placeholder" style="color:var(--accent-danger);">Vis.js library failed to load. Please check your internet connection.</div>
+    `;
+    return;
+  }
+
+  let container = document.getElementById("flowchart-network");
+  if (!container) {
+    dom.flowchartOutput.innerHTML = `
+      <div id="flowchart-network" style="width:100%; height:100%; min-height:350px;"></div>
+    `;
+    container = document.getElementById("flowchart-network");
+  }
+
+  const visNodes = nodes.map(node => {
+    let colorBorder = '#74B9FF'; // Default blue (process)
+    let colorBg = '#111827';
+    let label = node.text;
+
+    if (node.type === 'start') {
+      colorBorder = '#00CEC9'; // Teal
+      colorBg = '#0c1a24';
+    } else if (node.type === 'end') {
+      colorBorder = '#FF6B6B'; // Red
+      colorBg = '#1c121c';
+    } else if (node.type === 'decision') {
+      colorBorder = '#6C5CE7'; // Purple
+      colorBg = '#17142b';
+    } else if (node.type === 'io') {
+      colorBorder = '#00B894'; // Green
+      colorBg = '#0b1c18';
+    } else if (node.type === 'process') {
+      colorBorder = '#74B9FF'; // Blue
+      colorBg = '#111827';
+    }
+
+    if (node.text === 'Merge Path') {
+      return {
+        id: node.id,
+        label: '',
+        shape: 'circle',
+        size: 8,
+        color: {
+          background: '#5a6380',
+          border: '#5a6380',
+          highlight: { background: '#5a6380', border: '#5a6380' },
+          hover: { background: '#5a6380', border: '#5a6380' }
+        },
+        borderWidth: 1,
+        shadow: { enabled: false }
+      };
+    }
+
+    const svgData = createSvgNodeUrl(node.type, label, colorBorder, colorBg);
+
+    return {
+      id: node.id,
+      shape: 'image',
+      image: svgData.url,
+      color: {
+        background: colorBg,
+        border: colorBorder,
+        highlight: { background: colorBg, border: colorBorder },
+        hover: { background: colorBg, border: colorBorder }
+      },
+      shapeProperties: {
+        useImageSize: true
+      },
+      size: Math.max(svgData.width, svgData.height) / 2,
+      shadow: {
+        enabled: true,
+        color: 'rgba(0, 0, 0, 0.4)',
+        size: 5,
+        x: 0,
+        y: 3
+      }
+    };
+  });
+
+  const visEdges = links.map((link, idx) => {
+    return {
+      id: `edge_${idx}`,
+      from: link.from,
+      to: link.to,
+      label: link.label || '',
+      arrows: {
+        to: {
+          enabled: true,
+          scaleFactor: 0.8
+        }
+      },
+      color: {
+        color: '#5a6380',
+        highlight: '#6C5CE7',
+        hover: '#a29bfe'
+      },
+      font: {
+        color: '#8892a8',
+        size: 11,
+        face: 'Inter, system-ui, -apple-system, sans-serif',
+        background: '#0f1420',
+        strokeWidth: 0
+      },
+      smooth: {
+        type: 'cubicBezier',
+        forceDirection: 'vertical',
+        roundness: 0.5
+      }
+    };
+  });
+
+  const data = {
+    nodes: new vis.DataSet(visNodes),
+    edges: new vis.DataSet(visEdges)
+  };
+
+  const options = {
+    layout: {
+      hierarchical: {
+        enabled: true,
+        direction: 'UD',
+        sortMethod: 'directed',
+        nodeSpacing: 180,
+        levelSeparation: 140,
+        parentCentralization: true,
+        edgeMinimization: true,
+        blockShifting: true
+      }
+    },
+    physics: {
+      hierarchicalRepulsion: {
+        nodeSpacing: 180,
+        avoidOverlap: 1
+      }
+    },
+    interaction: {
+      hover: true,
+      zoomView: true,
+      dragView: true,
+      dragNodes: true
+    }
+  };
+
+  if (state.network) {
+    state.network.destroy();
+  }
+
+  state.network = new vis.Network(container, data, options);
+
+  setTimeout(() => {
+    if (state.network) {
+      state.network.setSize("100%", "100%");
+      state.network.redraw();
+      state.network.fit();
+    }
+  }, 100);
 }
 
 function cleanPrintStatement(line) {

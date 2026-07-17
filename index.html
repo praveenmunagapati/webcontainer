@@ -79,6 +79,15 @@
           </svg>
           <span>New</span>
         </button>
+        <button id="btn-save" class="toolbar-btn" title="Save File (Ctrl+S)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+            <polyline points="7 3 7 8 15 8"></polyline>
+          </svg>
+          <span>Save</span>
+        </button>
         <div class="toolbar-divider"></div>
         <button id="btn-compile" class="toolbar-btn btn-primary" title="Compile (Ctrl+B)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -217,7 +226,7 @@
         <span class="status-item" id="status-cursor">Ln 1, Col 1</span>
       </div>
       <div class="statusbar-right">
-        <span class="status-item">C (ISO C17)</span>
+        <span class="status-item" id="status-lang">C (ISO C17)</span>
         <span class="status-item">UTF-8</span>
         <span class="status-item" id="status-wasm-size" style="display:none;">WASM: -- bytes</span>
       </div>
@@ -238,7 +247,7 @@
   <!-- Third-party libraries (KaTeX, Pseudocode, Mermaid - CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pseudocode@2.4.1/build/pseudocode.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
 
   <!-- Monaco Editor Loader (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.js"></script>
