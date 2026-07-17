@@ -1826,7 +1826,7 @@ function renderVisFlowchart(nodes, links) {
     },
     physics: {
       hierarchicalRepulsion: {
-        nodeSpacing: 180,
+        nodeDistance: 180,
         avoidOverlap: 1
       }
     },
