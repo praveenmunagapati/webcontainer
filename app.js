@@ -523,6 +523,9 @@ async function compile() {
     
     logToConsole(`[VFS] Writing main code to virtual file "/project/${filename}"...`, "info");
     const vfsWriteStart = performance.now();
+    // Remove the old file first — Wasmer SDK's writeFile does not truncate,
+    // so a shorter file would retain leftover bytes from the previous write.
+    try { await state.projectDir.removeFile(filename); } catch (_) { /* first run */ }
     await state.projectDir.writeFile(filename, sourceCode);
     if (!state.isCompiling) return;
     logToConsole(`[VFS] Write completed in ${(performance.now() - vfsWriteStart).toFixed(1)}ms`, "info");
@@ -618,50 +621,181 @@ async function runWasm() {
     const module = await WebAssembly.compile(state.compiledBinary);
     logToConsole(`[WebAssembly] Native compilation completed in ${(performance.now() - wasmCompStart).toFixed(1)}ms`, "info");
 
-    logToConsole(`[Wasmer] Creating WASI worker package from compiled binary...`, "info");
-    const pkgStart = performance.now();
-    const pkg = await Wasmer.fromFile(state.compiledBinary);
-    logToConsole(`[Wasmer] Package initialized in ${(performance.now() - pkgStart).toFixed(1)}ms`, "info");
+    // Inspect module imports to build the right import object
+    const moduleImports = WebAssembly.Module.imports(module);
+    const needsEnvMemory = moduleImports.some(i => i.module === "env" && i.name === "memory");
+    const needsWasix = moduleImports.some(i => i.module === "wasix_32v1");
 
-    logToConsole(`[Wasmer] Spawning process and running entrypoint...`, "info");
+    logToConsole(`[WASI] Setting up lightweight WASI runtime shim...`, "info");
+
+    // Stdout / stderr capture buffers
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let wasmInstance = null;
+
+    // Helper: get the memory DataView (from export or imported env.memory)
+    let envMemory = null;
+    const getMem = () => new DataView(
+      (wasmInstance.exports.memory || envMemory).buffer
+    );
+
+    // Helper: safely decode bytes from possibly-shared memory
+    const decodeBytes = (buffer, ptr, len) => {
+      const slice = new Uint8Array(buffer, ptr, len);
+      // SharedArrayBuffer can't be decoded directly; copy first
+      if (buffer instanceof SharedArrayBuffer) {
+        const copy = new Uint8Array(len);
+        copy.set(slice);
+        return new TextDecoder().decode(copy);
+      }
+      return new TextDecoder().decode(slice);
+    };
+
+    // Minimal WASI snapshot preview1 implementation
+    const wasi_snapshot_preview1 = {
+      fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) {
+        const mem = getMem();
+        let totalWritten = 0;
+        const target = fd === 2 ? stderrChunks : stdoutChunks;
+        for (let i = 0; i < iovs_len; i++) {
+          const ptr = mem.getUint32(iovs_ptr + i * 8, true);
+          const len = mem.getUint32(iovs_ptr + i * 8 + 4, true);
+          target.push(decodeBytes(mem.buffer, ptr, len));
+          totalWritten += len;
+        }
+        mem.setUint32(nwritten_ptr, totalWritten, true);
+        return 0; // ESUCCESS
+      },
+      fd_read() { return 0; },
+      fd_close() { return 0; },
+      fd_seek()  { return 0; },
+      fd_fdstat_get(fd, stat_ptr) {
+        const mem = getMem();
+        // Set filetype = CHARACTER_DEVICE, flags = 0
+        mem.setUint8(stat_ptr, 2);      // fs_filetype
+        mem.setUint16(stat_ptr + 2, 0, true); // fs_flags
+        // rights_base & rights_inheriting — grant all
+        mem.setBigUint64(stat_ptr + 8, 0xFFFFFFFFFFFFFFFFn, true);
+        mem.setBigUint64(stat_ptr + 16, 0xFFFFFFFFFFFFFFFFn, true);
+        return 0;
+      },
+      fd_prestat_get()      { return 8; }, // EBADF — no preopened dirs
+      fd_prestat_dir_name() { return 8; },
+      path_open()           { return 44; }, // ENOSYS
+      environ_sizes_get(count_ptr, size_ptr) {
+        const mem = getMem();
+        mem.setUint32(count_ptr, 0, true);
+        mem.setUint32(size_ptr, 0, true);
+        return 0;
+      },
+      environ_get() { return 0; },
+      args_sizes_get(count_ptr, size_ptr) {
+        const mem = getMem();
+        mem.setUint32(count_ptr, 0, true);
+        mem.setUint32(size_ptr, 0, true);
+        return 0;
+      },
+      args_get() { return 0; },
+      clock_time_get(id, precision, out_ptr) {
+        const mem = getMem();
+        mem.setBigUint64(out_ptr, BigInt(Date.now()) * 1000000n, true);
+        return 0;
+      },
+      random_get(buf_ptr, buf_len) {
+        const buf = (wasmInstance.exports.memory || envMemory).buffer;
+        crypto.getRandomValues(new Uint8Array(buf, buf_ptr, buf_len));
+        return 0;
+      },
+      proc_exit(code) {
+        throw { __wasi_exit: true, code };
+      },
+    };
+
+    // Build the import object
+    const importObject = { wasi_snapshot_preview1 };
+
+    // Add WASIX stubs if needed (thread/futex syscalls — no-op for single-threaded)
+    if (needsWasix) {
+      importObject.wasix_32v1 = {
+        callback_signal: () => 0,
+        futex_wait:      () => 0,
+        futex_wake:      () => 0,
+        futex_wake_all:  () => 0,
+      };
+    }
+
+    // Provide env.memory if the module imports it
+    if (needsEnvMemory) {
+      // Clang/WASIX compiles require shared memory
+      try {
+        envMemory = new WebAssembly.Memory({ initial: 256, maximum: 256, shared: true });
+      } catch (_) {
+        envMemory = new WebAssembly.Memory({ initial: 256, maximum: 65536 });
+      }
+      importObject.env = { memory: envMemory };
+    }
+
+    // Add any remaining missing import stubs so instantiation doesn't fail
+    for (const imp of moduleImports) {
+      if (!importObject[imp.module]) importObject[imp.module] = {};
+      if (!(imp.name in importObject[imp.module])) {
+        if (imp.kind === "function") {
+          importObject[imp.module][imp.name] = () => 0;
+        }
+      }
+    }
+
+    logToConsole(`[WASI] Instantiating WebAssembly module...`, "info");
+    const instStart = performance.now();
+    wasmInstance = await WebAssembly.instantiate(module, importObject);
+    logToConsole(`[WASI] Instance created in ${(performance.now() - instStart).toFixed(1)}ms`, "info");
+
+    logToConsole(`[WASI] Executing _start entrypoint...`, "info");
     const execStart = performance.now();
-    const instance = await pkg.entrypoint.run();
-    
-    logToConsole(`[Wasmer] Process spawned. Awaiting output...`, "info");
-    const result = await instance.wait();
-    logToConsole(`[Wasmer] Process execution completed in ${(performance.now() - execStart).toFixed(1)}ms with exit code ${result.code}`, "info");
+    let exitCode = 0;
 
-    if (result.stdout) {
-      const stdoutText = typeof result.stdout === "string"
-        ? result.stdout
-        : new TextDecoder().decode(result.stdout);
-      if (stdoutText.trim()) {
-        logToConsole(`[Wasmer] Captured stdout output:`, "info");
-        stdoutText.split("\n").forEach((line) => {
-          if (line) {
-            logToProgram(line, "stdout");
-            logToConsole(`  [stdout] ${line}`, "info");
-          }
-        });
+    try {
+      if (wasmInstance.exports._start) {
+        wasmInstance.exports._start();
+      } else if (wasmInstance.exports.main) {
+        wasmInstance.exports.main();
+      } else {
+        throw new Error("No _start or main export found in WASM binary");
+      }
+    } catch (e) {
+      if (e && e.__wasi_exit) {
+        exitCode = e.code;
+      } else {
+        throw e; // re-throw real errors
       }
     }
 
-    if (result.stderr) {
-      const stderrText = typeof result.stderr === "string"
-        ? result.stderr
-        : new TextDecoder().decode(result.stderr);
-      if (stderrText.trim()) {
-        logToConsole(`[Wasmer] Captured stderr output:`, "warning");
-        stderrText.split("\n").forEach((line) => {
-          if (line) {
-            logToProgram(line, "error");
-            logToConsole(`  [stderr] ${line}`, "warning");
-          }
-        });
-      }
+    logToConsole(`[WASI] Execution completed in ${(performance.now() - execStart).toFixed(1)}ms with exit code ${exitCode}`, "info");
+
+    // Display captured stdout
+    const stdoutText = stdoutChunks.join("");
+    if (stdoutText.trim()) {
+      logToConsole(`[WASI] Captured stdout output:`, "info");
+      stdoutText.split("\n").forEach((line) => {
+        if (line) {
+          logToProgram(line, "stdout");
+          logToConsole(`  [stdout] ${line}`, "info");
+        }
+      });
     }
 
-    const exitCode = result.code ?? 0;
+    // Display captured stderr
+    const stderrText = stderrChunks.join("");
+    if (stderrText.trim()) {
+      logToConsole(`[WASI] Captured stderr output:`, "warning");
+      stderrText.split("\n").forEach((line) => {
+        if (line) {
+          logToProgram(line, "error");
+          logToConsole(`  [stderr] ${line}`, "warning");
+        }
+      });
+    }
+
     logToConsole(`Success: Program execution finished in ${(performance.now() - runStart).toFixed(1)}ms (exit code ${exitCode})`, exitCode === 0 ? "success" : "warning");
     setStatus("Ready", "idle");
   } catch (err) {
@@ -714,6 +848,7 @@ function setupEditor(callback) {
       automaticLayout: true,
       fontSize: 14,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, monospace',
+      fontLigatures: false,
       minimap: { enabled: true },
       lineNumbers: 'on',
       tabSize: 4,
@@ -745,6 +880,13 @@ function setupEditor(callback) {
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, () => compile());
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runWasm());
     state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => compileAndRun());
+
+    // Remeasure fonts once web fonts (JetBrains Mono) have finished loading.
+    // Monaco measures character widths at init using the fallback font;
+    // this corrects the measurement so cursor clicks land accurately.
+    document.fonts.ready.then(() => {
+      monaco.editor.remeasureFonts();
+    });
 
     if (callback) callback();
   });
