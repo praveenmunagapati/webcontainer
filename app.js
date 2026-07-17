@@ -1151,10 +1151,16 @@ function renderFlowchartAndAlgorithm() {
   const sourceCode = state.editor.getValue();
   if (!sourceCode) return;
 
+  // 1. Render Flowchart using Vis Network
   try {
     const analysis = parseCodeToFlow(sourceCode, state.language);
-    
-    // 1. Render Algorithm using pseudocode.js
+    renderVisFlowchart(analysis.nodes, analysis.links);
+  } catch (err) {
+    console.error("Flowchart generation error:", err);
+  }
+
+  // 2. Render Algorithm using pseudocode.js
+  try {
     const latex = parseCodeToPseudocode(sourceCode, state.language);
     dom.algorithmOutput.innerHTML = `
       <div class="algorithm-container active" style="padding:16px;">
@@ -1171,11 +1177,13 @@ function renderFlowchartAndAlgorithm() {
         captionCount: 0
       });
     }
-    
-    // 2. Render Flowchart using Vis Network
-    renderVisFlowchart(analysis.nodes, analysis.links);
   } catch (err) {
-    console.error("Analysis generation error:", err);
+    console.error("Algorithm generation error:", err);
+    dom.algorithmOutput.innerHTML = `
+      <div class="error-container" style="padding:16px; color:var(--text-danger);">
+        Failed to render algorithm pseudocode: ${escapeHtml(err.message || err)}
+      </div>
+    `;
   }
 }
 
@@ -2015,14 +2023,14 @@ function parseCodeToPseudocode(code, language) {
           loopRange = `${init} to ${check}`;
         }
       }
-      latex += `\\FOR{${escapeLatexMath(loopRange)}}\n`;
+      latex += `\\FOR{$${escapeLatexMath(loopRange)}$}\n`;
       blockStack.push("for");
       continue;
     }
     
     if (whileMatch) {
       let cond = whileMatch[1].trim();
-      latex += `\\WHILE{${escapeLatexMath(cond)}}\n`;
+      latex += `\\WHILE{$${escapeLatexMath(cond)}$}\n`;
       blockStack.push("while");
       continue;
     }
@@ -2030,14 +2038,14 @@ function parseCodeToPseudocode(code, language) {
     const ifMatch = line.match(/^if\s*\((.*)\)/);
     if (ifMatch) {
       let cond = ifMatch[1].trim();
-      latex += `\\IF{${escapeLatexMath(cond)}}\n`;
+      latex += `\\IF{$${escapeLatexMath(cond)}$}\n`;
       blockStack.push("if");
       continue;
     }
     
     if (line.startsWith("else if")) {
       const cond = line.match(/if\s*\((.*)\)/)?.[1]?.trim() || "condition";
-      latex += `\\ELSIF{${escapeLatexMath(cond)}}\n`;
+      latex += `\\ELSIF{$${escapeLatexMath(cond)}$}\n`;
       continue;
     }
     
@@ -2048,7 +2056,11 @@ function parseCodeToPseudocode(code, language) {
     
     if (line.startsWith("return") || line.startsWith("exit")) {
       let val = line.replace(/^(return|exit)/, "").replace(";", "").trim();
-      latex += `\\RETURN ${escapeLatexMath(val)}\n`;
+      if (val) {
+        latex += `\\RETURN $${escapeLatexMath(val)}$\n`;
+      } else {
+        latex += `\\RETURN\n`;
+      }
       continue;
     }
     
@@ -2078,7 +2090,7 @@ function parseCodeToPseudocode(code, language) {
         latex += `\\PRINT{${escapeLatexText(content)}}\n`;
       } else if (isScan) {
         let content = line.replace(/scanf|std::cin|cin|<<|>>|;|\(|\)|&/g, "").trim();
-        latex += `\\READ{${escapeLatexMath(content)}}\n`;
+        latex += `\\READ{$${escapeLatexMath(content)}$}\n`;
       } else {
         let stmt = line.replace(";", "").trim();
         stmt = stmt.replace(/\s*=\s*/, " \\gets ");
@@ -2103,18 +2115,21 @@ function parseCodeToPseudocode(code, language) {
 
 function escapeLatexMath(str) {
   if (!str) return "";
-  return str
+  let clean = str
+    .replace(/&&/g, " \\text{ and } ")
+    .replace(/\|\|/g, " \\text{ or } ")
     .replace(/&/g, "\\&")
     .replace(/%/g, "\\%")
     .replace(/_/g, "\\_")
-    .replace(/&&/g, " \\text{ and } ")
-    .replace(/\|\|/g, " \\text{ or } ")
     .replace(/!=/g, " \\ne ")
     .replace(/<=/g, " \\le ")
     .replace(/>=/g, " \\ge ")
     .replace(/==/g, " = ")
     .replace(/</g, " < ")
     .replace(/>/g, " > ");
+  
+  clean = clean.replace(/\bto\b/g, " \\text{ to } ");
+  return clean;
 }
 
 function escapeLatexText(str) {
