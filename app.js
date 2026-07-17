@@ -41,6 +41,8 @@ const state = {
   activeCompileInstance: null,
   network: null,
   savedValue: "",
+  selectedFunction: "main",
+  parsedFunctions: [],
 };
 
 // ---- DOM refs ----
@@ -79,6 +81,8 @@ const dom = {
   flowchartOutput:$("#flowchart-output"),
   selectLanguage: $("#select-language"),
   statusLang:     $("#status-lang"),
+  functionSelectContainer: $("#function-select-container"),
+  functionSelect:          $("#function-select"),
 };
 
 // ---- Examples ----
@@ -827,6 +831,11 @@ function switchTab(tab) {
   dom.programOutput.classList.toggle("active", tab === "output");
   dom.algorithmOutput.classList.toggle("active", tab === "algorithm");
   dom.flowchartOutput.classList.toggle("active", tab === "flowchart");
+
+  const showSelector = tab === "algorithm" || tab === "flowchart";
+  if (dom.functionSelectContainer) {
+    dom.functionSelectContainer.style.display = showSelector ? "flex" : "none";
+  }
   
   if (tab === "flowchart" && state.network) {
     setTimeout(() => {
@@ -1107,6 +1116,11 @@ function bindEvents() {
   dom.tabAlgorithm.addEventListener("click", () => switchTab("algorithm"));
   dom.tabFlowchart.addEventListener("click", () => switchTab("flowchart"));
 
+  dom.functionSelect.addEventListener("change", (e) => {
+    state.selectedFunction = e.target.value;
+    renderFlowchartAndAlgorithm();
+  });
+
   // Global keyboard shortcuts
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "s") {
@@ -1151,9 +1165,39 @@ function renderFlowchartAndAlgorithm() {
   const sourceCode = state.editor.getValue();
   if (!sourceCode) return;
 
+  // Sync function dropdown
+  const functions = extractAllFunctions(sourceCode);
+  state.parsedFunctions = functions;
+  
+  const currentSelect = dom.functionSelect.value;
+  dom.functionSelect.innerHTML = "";
+  
+  functions.forEach(f => {
+    const opt = document.createElement("option");
+    opt.value = f.name;
+    opt.textContent = `${f.name}()`;
+    dom.functionSelect.appendChild(opt);
+  });
+
+  if (functions.some(f => f.name === currentSelect)) {
+    dom.functionSelect.value = currentSelect;
+    state.selectedFunction = currentSelect;
+  } else if (functions.length > 0) {
+    const mainFunc = functions.find(f => f.name === "main");
+    if (mainFunc) {
+      dom.functionSelect.value = "main";
+      state.selectedFunction = "main";
+    } else {
+      dom.functionSelect.value = functions[0].name;
+      state.selectedFunction = functions[0].name;
+    }
+  } else {
+    state.selectedFunction = "main";
+  }
+
   // 1. Render Flowchart using Vis Network
   try {
-    const analysis = parseCodeToFlow(sourceCode, state.language);
+    const analysis = parseCodeToFlow(sourceCode, state.language, state.selectedFunction);
     renderVisFlowchart(analysis.nodes, analysis.links);
   } catch (err) {
     console.error("Flowchart generation error:", err);
@@ -1161,7 +1205,7 @@ function renderFlowchartAndAlgorithm() {
 
   // 2. Render Algorithm using pseudocode.js
   try {
-    const latex = parseCodeToPseudocode(sourceCode, state.language);
+    const latex = parseCodeToPseudocode(sourceCode, state.language, state.selectedFunction);
     dom.algorithmOutput.innerHTML = `
       <div class="algorithm-container active" style="padding:16px;">
         <div id="latex-algorithm" class="pseudocode-pre" style="background:var(--bg-secondary); border:1px solid var(--border-default); padding:16px; border-radius:var(--radius-md); font-family:var(--font-ui);">
@@ -1292,7 +1336,49 @@ function toNaturalLanguage(stmt) {
   return clean;
 }
 
-function parseCodeToFlow(code, language) {
+function findMatchingBrace(str, startIdx) {
+  let depth = 0;
+  for (let i = startIdx; i < str.length; i++) {
+    if (str[i] === '{') depth++;
+    else if (str[i] === '}') { depth--; if (depth === 0) return i; }
+  }
+  return str.length - 1;
+}
+
+function extractAllFunctions(src) {
+  const functions = [];
+  const regex = /\b((?:struct\s+)?(?:[a-zA-Z_]\w*(?:\s*\*+)?\s*)+)\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*(?=\{)/g;
+  let match;
+  
+  while ((match = regex.exec(src)) !== null) {
+    const type = match[1].trim();
+    const name = match[2].trim();
+    const args = match[3].trim();
+    
+    if (/^(if|for|while|switch|else|catch)$/.test(name)) {
+      continue;
+    }
+    
+    const sigEndIdx = match.index + match[0].length;
+    let openBraceIdx = src.indexOf('{', sigEndIdx);
+    if (openBraceIdx === -1) continue;
+    
+    const closeBraceIdx = findMatchingBrace(src, openBraceIdx);
+    const body = src.substring(openBraceIdx + 1, closeBraceIdx).trim();
+    
+    functions.push({
+      type,
+      name,
+      args,
+      body,
+      startIdx: match.index,
+      endIdx: closeBraceIdx + 1
+    });
+  }
+  return functions;
+}
+
+function parseCodeToFlow(code, language, targetFunctionName = "main") {
   let cleanCode = code
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*/g, "");
@@ -1604,9 +1690,11 @@ function parseCodeToFlow(code, language) {
   // ---- Drive ----
   const startId = addNode('start', 'Start');
 
-  const mainBody = extractMainBody(cleanCode);
-  if (mainBody) {
-    const stmts = parseBlock(mainBody);
+  const functions = extractAllFunctions(cleanCode);
+  const targetFunc = functions.find(f => f.name === targetFunctionName);
+
+  if (targetFunc) {
+    const stmts = parseBlock(targetFunc.body);
     const lastId = buildFlow(stmts, startId);
 
     // End node (if the code didn't already end with return)
@@ -1959,33 +2047,43 @@ function cleanPrintStatement(line) {
   return line;
 }
 
-function parseCodeToPseudocode(code, language) {
+function parseCodeToPseudocode(code, language, targetFunctionName = "main") {
   let cleanCode = code
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*/g, "");
 
-  let lines = cleanCode.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  const functions = extractAllFunctions(cleanCode);
+  const targetFunc = functions.find(f => f.name === targetFunctionName);
   
   let latex = "\\begin{algorithm}\n";
-  latex += `\\caption{Algorithm for main.${language === 'cpp' ? 'cpp' : 'c'}}\n`;
+  if (targetFunc) {
+    latex += `\\caption{Algorithm for ${targetFunc.name}()}\n`;
+  } else {
+    latex += `\\caption{Algorithm for main.${language === 'cpp' ? 'cpp' : 'c'}}\n`;
+  }
   latex += "\\begin{algorithmic}\n";
   
-  let blockStack = [];
-  let inMain = false;
+  if (!targetFunc) {
+    latex += "\\end{algorithmic}\n";
+    latex += "\\end{algorithm}";
+    return latex;
+  }
+
+  const procName = targetFunc.name.charAt(0).toUpperCase() + targetFunc.name.slice(1);
+  let cleanArgs = targetFunc.args.trim();
+  if (cleanArgs) {
+    cleanArgs = cleanArgs
+      .replace(/(?:struct\s+)?\w+(?:\s*\*+)?\s+(\w+)/g, "$1")
+      .replace(/\s*\*+\s*/g, "");
+  }
+  
+  latex += `\\PROCEDURE{${procName}}{${cleanArgs}}\n`;
+  
+  let lines = targetFunc.body.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  let blockStack = ["procedure"];
   
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
-    
-    if (line.startsWith("#include") || line.startsWith("using namespace")) {
-      continue;
-    }
-    
-    if (line.match(/^(int|void|float|double|char)\s+main\s*\(/)) {
-      latex += "\\PROCEDURE{Main}{}\n";
-      blockStack.push("procedure");
-      inMain = true;
-      continue;
-    }
     
     if (line === "{") {
       continue;
@@ -2001,7 +2099,6 @@ function parseCodeToPseudocode(code, language) {
         const init = parts[0].replace(/^(int|long|size_t)\s+/, "").trim();
         const check = parts[1].trim();
         
-        // Try to parse standard for-loop components to make it look like human pseudocode
         const initMatch = init.match(/(\w+)\s*=\s*(.*)/);
         const checkMatch = check.match(/(\w+)\s*(<|<=|>|>=)\s*(.*)/);
         
@@ -2069,7 +2166,6 @@ function parseCodeToPseudocode(code, language) {
         let blockType = blockStack.pop();
         if (blockType === "procedure") {
           latex += "\\ENDPROCEDURE\n";
-          inMain = false;
         } else if (blockType === "if") {
           latex += "\\ENDIF\n";
         } else if (blockType === "for") {
@@ -2081,22 +2177,20 @@ function parseCodeToPseudocode(code, language) {
       continue;
     }
     
-    if (inMain) {
-      const isPrint = line.includes("printf") || line.includes("cout");
-      const isScan = line.includes("scanf") || line.includes("cin");
-      
-      if (isPrint) {
-        const content = cleanPrintStatement(line);
-        latex += `\\PRINT{${escapeLatexText(content)}}\n`;
-      } else if (isScan) {
-        let content = line.replace(/scanf|std::cin|cin|<<|>>|;|\(|\)|&/g, "").trim();
-        latex += `\\READ{$${escapeLatexMath(content)}$}\n`;
-      } else {
-        let stmt = line.replace(";", "").trim();
-        stmt = stmt.replace(/\s*=\s*/, " \\gets ");
-        stmt = stmt.replace(/^(int|long|float|double|char|bool|auto|std::vector|vector)\s+/, "");
-        latex += `\\STATE $${escapeLatexMath(stmt)}$\n`;
-      }
+    const isPrint = line.includes("printf") || line.includes("cout");
+    const isScan = line.includes("scanf") || line.includes("cin");
+    
+    if (isPrint) {
+      const content = cleanPrintStatement(line);
+      latex += `\\PRINT{${escapeLatexText(content)}}\n`;
+    } else if (isScan) {
+      let content = line.replace(/scanf|std::cin|cin|<<|>>|;|\(|\)|&/g, "").trim();
+      latex += `\\READ{$${escapeLatexMath(content)}$}\n`;
+    } else {
+      let stmt = line.replace(";", "").trim();
+      stmt = stmt.replace(/\s*=\s*/, " \\gets ");
+      stmt = stmt.replace(/^(int|long|float|double|char|bool|auto|std::vector|vector)\s+/, "");
+      latex += `\\STATE $${escapeLatexMath(stmt)}$\n`;
     }
   }
   
