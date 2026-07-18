@@ -83,6 +83,20 @@ const dom = {
   statusLang:     $("#status-lang"),
   functionSelectContainer: $("#function-select-container"),
   functionSelect:          $("#function-select"),
+  // Pipeline tabs
+  tabPreprocessor: $("#tab-preprocessor"),
+  tabLexer:        $("#tab-lexer"),
+  tabParser:       $("#tab-parser"),
+  tabSemantic:     $("#tab-semantic"),
+  tabIrcode:       $("#tab-ircode"),
+  tabBinary:       $("#tab-binary"),
+  // Pipeline output containers
+  preprocessorOutput: $("#preprocessor-output"),
+  lexerOutput:        $("#lexer-output"),
+  parserOutput:       $("#parser-output"),
+  semanticOutput:     $("#semantic-output"),
+  ircodeOutput:       $("#ircode-output"),
+  binaryOutput:       $("#binary-output"),
 };
 
 // ---- Examples ----
@@ -586,6 +600,9 @@ async function compile() {
       dom.statusWasm.textContent = `WASM: ${wasmBinary.byteLength.toLocaleString()} bytes`;
       dom.statusWasm.style.display = "inline-flex";
       setButtonStates(false, true);
+
+      // Update binary viewer (Stage 6) with the actual WASM binary
+      try { renderBinaryViewer(wasmBinary); } catch (e) { console.error("Binary viewer error:", e); }
     } else {
       completeProgressBar(false);
       setStatus("Error", "error");
@@ -822,15 +839,24 @@ async function compileAndRun() {
 
 // ---- Tab Switching ----
 function switchTab(tab) {
-  dom.tabConsole.classList.toggle("active", tab === "console");
-  dom.tabOutput.classList.toggle("active",  tab === "output");
-  dom.tabAlgorithm.classList.toggle("active", tab === "algorithm");
-  dom.tabFlowchart.classList.toggle("active", tab === "flowchart");
-  
-  dom.consoleOutput.classList.toggle("active", tab === "console");
-  dom.programOutput.classList.toggle("active", tab === "output");
-  dom.algorithmOutput.classList.toggle("active", tab === "algorithm");
-  dom.flowchartOutput.classList.toggle("active", tab === "flowchart");
+  // All tab buttons
+  const tabMap = {
+    console:      { btn: dom.tabConsole,       content: dom.consoleOutput },
+    output:       { btn: dom.tabOutput,         content: dom.programOutput },
+    algorithm:    { btn: dom.tabAlgorithm,      content: dom.algorithmOutput },
+    flowchart:    { btn: dom.tabFlowchart,      content: dom.flowchartOutput },
+    preprocessor: { btn: dom.tabPreprocessor,   content: dom.preprocessorOutput },
+    lexer:        { btn: dom.tabLexer,          content: dom.lexerOutput },
+    parser:       { btn: dom.tabParser,         content: dom.parserOutput },
+    semantic:     { btn: dom.tabSemantic,       content: dom.semanticOutput },
+    ircode:       { btn: dom.tabIrcode,         content: dom.ircodeOutput },
+    binary:       { btn: dom.tabBinary,         content: dom.binaryOutput },
+  };
+
+  for (const [key, { btn, content }] of Object.entries(tabMap)) {
+    if (btn) btn.classList.toggle("active", key === tab);
+    if (content) content.classList.toggle("active", key === tab);
+  }
 
   const showSelector = tab === "algorithm" || tab === "flowchart";
   if (dom.functionSelectContainer) {
@@ -1115,6 +1141,13 @@ function bindEvents() {
   dom.tabOutput.addEventListener("click",  () => switchTab("output"));
   dom.tabAlgorithm.addEventListener("click", () => switchTab("algorithm"));
   dom.tabFlowchart.addEventListener("click", () => switchTab("flowchart"));
+  // Pipeline tabs
+  dom.tabPreprocessor.addEventListener("click", () => switchTab("preprocessor"));
+  dom.tabLexer.addEventListener("click", () => switchTab("lexer"));
+  dom.tabParser.addEventListener("click", () => switchTab("parser"));
+  dom.tabSemantic.addEventListener("click", () => switchTab("semantic"));
+  dom.tabIrcode.addEventListener("click", () => switchTab("ircode"));
+  dom.tabBinary.addEventListener("click", () => switchTab("binary"));
 
   dom.functionSelect.addEventListener("change", (e) => {
     state.selectedFunction = e.target.value;
@@ -1228,6 +1261,13 @@ function renderFlowchartAndAlgorithm() {
         Failed to render algorithm pseudocode: ${escapeHtml(err.message || err)}
       </div>
     `;
+  }
+
+  // 3. Render Pipeline Stages 1-5 (preprocessor through IR)
+  try {
+    renderPipelineStages(sourceCode);
+  } catch (err) {
+    console.error("Pipeline rendering error:", err);
   }
 }
 
@@ -1347,33 +1387,57 @@ function findMatchingBrace(str, startIdx) {
 
 function extractAllFunctions(src) {
   const functions = [];
-  const regex = /\b((?:struct\s+)?(?:[a-zA-Z_]\w*(?:\s*\*+)?\s*)+)\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*(?=\{)/g;
-  let match;
+  let idx = 0;
   
-  while ((match = regex.exec(src)) !== null) {
-    const type = match[1].trim();
-    const name = match[2].trim();
-    const args = match[3].trim();
+  while (true) {
+    idx = src.indexOf('{', idx);
+    if (idx === -1) break;
     
-    if (/^(if|for|while|switch|else|catch)$/.test(name)) {
-      continue;
+    const closeBraceIdx = findMatchingBrace(src, idx);
+    
+    let sigStart = idx - 1;
+    while (sigStart >= 0) {
+      const ch = src[sigStart];
+      if (ch === ';' || ch === '}' || ch === '{' || ch === '#') {
+        sigStart++;
+        break;
+      }
+      sigStart--;
+    }
+    if (sigStart < 0) sigStart = 0;
+    
+    const signature = src.substring(sigStart, idx).trim();
+    const parenCloseIdx = signature.lastIndexOf(')');
+    if (parenCloseIdx !== -1) {
+      const parenOpenIdx = signature.lastIndexOf('(', parenCloseIdx);
+      if (parenOpenIdx !== -1) {
+        const beforeParen = signature.substring(0, parenOpenIdx).trim();
+        const nameMatch = beforeParen.match(/(\w+)\s*\*?$/);
+        if (nameMatch) {
+          const name = nameMatch[1];
+          if (!/^(if|for|while|switch|else|catch)$/.test(name)) {
+            const type = beforeParen.substring(0, beforeParen.length - nameMatch[0].length).trim();
+            const args = signature.substring(parenOpenIdx + 1, parenCloseIdx).trim();
+            const body = src.substring(idx + 1, closeBraceIdx).trim();
+            
+            functions.push({
+              type,
+              name,
+              args,
+              body,
+              startIdx: sigStart,
+              endIdx: closeBraceIdx + 1
+            });
+          }
+        }
+      }
     }
     
-    const sigEndIdx = match.index + match[0].length;
-    let openBraceIdx = src.indexOf('{', sigEndIdx);
-    if (openBraceIdx === -1) continue;
-    
-    const closeBraceIdx = findMatchingBrace(src, openBraceIdx);
-    const body = src.substring(openBraceIdx + 1, closeBraceIdx).trim();
-    
-    functions.push({
-      type,
-      name,
-      args,
-      body,
-      startIdx: match.index,
-      endIdx: closeBraceIdx + 1
-    });
+    if (closeBraceIdx > idx) {
+      idx = closeBraceIdx + 1;
+    } else {
+      idx++;
+    }
   }
   return functions;
 }
@@ -2072,12 +2136,15 @@ function parseCodeToPseudocode(code, language, targetFunctionName = "main") {
   const procName = targetFunc.name.charAt(0).toUpperCase() + targetFunc.name.slice(1);
   let cleanArgs = targetFunc.args.trim();
   if (cleanArgs) {
-    cleanArgs = cleanArgs
-      .replace(/(?:struct\s+)?\w+(?:\s*\*+)?\s+(\w+)/g, "$1")
-      .replace(/\s*\*+\s*/g, "");
+    cleanArgs = cleanArgs.split(',')
+      .map(arg => {
+        const match = arg.trim().match(/(\w+)\s*(?:\s*\[\s*\])?\s*$/);
+        return match ? match[1] : arg.trim();
+      })
+      .join(', ');
   }
   
-  latex += `\\PROCEDURE{${procName}}{${cleanArgs}}\n`;
+  latex += `\\PROCEDURE{${procName}}{${escapeLatexMath(cleanArgs)}}\n`;
   
   let lines = targetFunc.body.split("\n").map(l => l.trim()).filter(l => l.length > 0);
   let blockStack = ["procedure"];
@@ -2100,7 +2167,7 @@ function parseCodeToPseudocode(code, language, targetFunctionName = "main") {
         const check = parts[1].trim();
         
         const initMatch = init.match(/(\w+)\s*=\s*(.*)/);
-        const checkMatch = check.match(/(\w+)\s*(<|<=|>|>=)\s*(.*)/);
+        const checkMatch = check.match(/(\w+)\s*(<=|>=|<|>)\s*(.*)/);
         
         if (initMatch && checkMatch && initMatch[1] === checkMatch[1]) {
           const varName = initMatch[1];
@@ -2113,6 +2180,11 @@ function parseCodeToPseudocode(code, language, targetFunctionName = "main") {
             loopRange = `${varName} = ${startVal} to ${limitMinusOne}`;
           } else if (op === "<=") {
             loopRange = `${varName} = ${startVal} to ${limit}`;
+          } else if (op === ">") {
+            const limitPlusOne = isNaN(limit) ? `${limit} + 1` : (parseInt(limit) + 1).toString();
+            loopRange = `${varName} = ${startVal} down to ${limitPlusOne}`;
+          } else if (op === ">=") {
+            loopRange = `${varName} = ${startVal} down to ${limit}`;
           } else {
             loopRange = `${init} to ${check}`;
           }
@@ -2189,7 +2261,7 @@ function parseCodeToPseudocode(code, language, targetFunctionName = "main") {
     } else {
       let stmt = line.replace(";", "").trim();
       stmt = stmt.replace(/\s*=\s*/, " \\gets ");
-      stmt = stmt.replace(/^(int|long|float|double|char|bool|auto|std::vector|vector)\s+/, "");
+      stmt = stmt.replace(/^(?:struct\s+)?\w+(?:\s*\*+)?\s*(\w+)(?=\s*=|;|$)/, "$1");
       latex += `\\STATE $${escapeLatexMath(stmt)}$\n`;
     }
   }
@@ -2222,7 +2294,9 @@ function escapeLatexMath(str) {
     .replace(/</g, " < ")
     .replace(/>/g, " > ");
   
+  clean = clean.replace(/\bdown\s+to\b/g, "__DOWN_TO__");
   clean = clean.replace(/\bto\b/g, " \\text{ to } ");
+  clean = clean.replace(/__DOWN_TO__/g, " \\text{ down to } ");
   return clean;
 }
 
@@ -2242,4 +2316,1481 @@ function escapeLatexText(str) {
     .replace(/_/g, "\\_")
     .replace(/{/g, "\\{")
     .replace(/}/g, "\\}");
+}
+
+// =============================================
+// COMPILATION PIPELINE VISUALIZATION ENGINE
+// =============================================
+
+const PIPELINE_STAGES = [
+  { id: "preprocessor", num: 1, title: "Preprocessor",      desc: "Macro expansion, #include resolution, conditional compilation" },
+  { id: "lexer",        num: 2, title: "Lexical Analysis",   desc: "Tokenizing source code into classified token stream" },
+  { id: "parser",       num: 3, title: "Syntax Analysis",    desc: "Building Abstract Syntax Tree from token stream" },
+  { id: "semantic",     num: 4, title: "Semantic Analysis",  desc: "Type checking, symbol table construction, scope resolution" },
+  { id: "ircode",       num: 5, title: "IR Generation",      desc: "Three-address code and pseudo-assembly output" },
+  { id: "binary",       num: 6, title: "Binary Output",      desc: "WebAssembly binary hex dump with section annotations" },
+];
+
+function buildStageHeader(stageId) {
+  const stage = PIPELINE_STAGES.find(s => s.id === stageId);
+  if (!stage) return "";
+  
+  let breadcrumbs = "";
+  PIPELINE_STAGES.forEach((s, i) => {
+    const cls = s.num < stage.num ? "completed" : (s.num === stage.num ? "active" : "");
+    breadcrumbs += `<div class="breadcrumb-step ${cls}" title="Stage ${s.num}: ${s.title}"></div>`;
+    if (i < PIPELINE_STAGES.length - 1) {
+      const connCls = s.num < stage.num ? "completed" : "";
+      breadcrumbs += `<div class="breadcrumb-connector ${connCls}"></div>`;
+    }
+  });
+  
+  return `
+    <div class="pipeline-stage-header">
+      <div class="stage-title">
+        <span class="stage-number">${stage.num}</span>
+        ${stage.title}
+      </div>
+      <div class="stage-description">${stage.desc}</div>
+      <div class="pipeline-breadcrumb">${breadcrumbs}</div>
+    </div>
+  `;
+}
+
+// ---- Master Pipeline Renderer ----
+function renderPipelineStages(sourceCode) {
+  if (!sourceCode || !sourceCode.trim()) return;
+  
+  // Stage 1: Preprocessor
+  try {
+    const preprocResult = simulatePreprocessor(sourceCode);
+    renderPreprocessorOutput(preprocResult);
+  } catch (e) { console.error("Preprocessor stage error:", e); }
+
+  // Stage 2: Lexer
+  try {
+    const tokens = tokenizeCode(sourceCode);
+    renderTokenTable(tokens);
+  } catch (e) { console.error("Lexer stage error:", e); }
+
+  // Stage 3: Parser/AST
+  try {
+    const tokens = tokenizeCode(sourceCode);
+    const ast = parseToAST(tokens, sourceCode);
+    renderASTTree(ast);
+  } catch (e) { console.error("Parser stage error:", e); }
+
+  // Stage 4: Semantic Analysis
+  try {
+    const tokens = tokenizeCode(sourceCode);
+    const ast = parseToAST(tokens, sourceCode);
+    const semantics = analyzeSemantics(ast, sourceCode);
+    renderSemanticOutput(semantics);
+  } catch (e) { console.error("Semantic stage error:", e); }
+
+  // Stage 5: IR / Assembly
+  try {
+    const tokens = tokenizeCode(sourceCode);
+    const ast = parseToAST(tokens, sourceCode);
+    const ir = generateIR(ast);
+    renderIROutput(ir);
+  } catch (e) { console.error("IR stage error:", e); }
+}
+
+// =============================================
+// STAGE 1: PREPROCESSOR SIMULATION
+// =============================================
+function simulatePreprocessor(code) {
+  const lines = code.split("\n");
+  const defines = {};
+  const includes = [];
+  const outputLines = [];
+  const ifStack = []; // track #ifdef/#ifndef nesting
+  let activeCondition = true;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // #include directives
+    const includeMatch = line.match(/^#include\s*[<"]([^>"]+)[>"]/); 
+    if (includeMatch) {
+      includes.push({ name: includeMatch[1], line: i + 1, type: line.includes("<") ? "system" : "user" });
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* #include <${includeMatch[1]}> — contents loaded from system library */`, type: "include" });
+      continue;
+    }
+    
+    // #define macros
+    const defineMatch = line.match(/^#define\s+(\w+)(?:\(([^)]+)\))?\s*(.*)/);
+    if (defineMatch) {
+      const name = defineMatch[1];
+      const params = defineMatch[2] ? defineMatch[2].split(",").map(p => p.trim()) : null;
+      const body = defineMatch[3] || "";
+      defines[name] = { body, params, line: i + 1 };
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* macro ${name} = ${body || '(defined)'} */`, type: "define" });
+      continue;
+    }
+    
+    // #ifdef / #ifndef / #endif
+    if (line.match(/^#ifdef\s+(\w+)/)) {
+      const macroName = line.match(/^#ifdef\s+(\w+)/)[1];
+      ifStack.push(activeCondition);
+      activeCondition = activeCondition && !!defines[macroName];
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* #ifdef ${macroName}: ${defines[macroName] ? 'TRUE — block included' : 'FALSE — block excluded'} */`, type: "conditional" });
+      continue;
+    }
+    if (line.match(/^#ifndef\s+(\w+)/)) {
+      const macroName = line.match(/^#ifndef\s+(\w+)/)[1];
+      ifStack.push(activeCondition);
+      activeCondition = activeCondition && !defines[macroName];
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* #ifndef ${macroName}: ${!defines[macroName] ? 'TRUE — block included' : 'FALSE — block excluded'} */`, type: "conditional" });
+      continue;
+    }
+    if (line === "#else") {
+      activeCondition = !activeCondition && (ifStack.length === 0 || ifStack[ifStack.length - 1]);
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* #else — ${activeCondition ? 'block now included' : 'block now excluded'} */`, type: "conditional" });
+      continue;
+    }
+    if (line === "#endif") {
+      activeCondition = ifStack.pop() !== undefined ? ifStack.length === 0 || ifStack[ifStack.length - 1] : true;
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* #endif */`, type: "conditional" });
+      continue;
+    }
+    
+    // Other preprocessor directives
+    if (line.startsWith("#")) {
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* ${line} */`, type: "directive" });
+      continue;
+    }
+    
+    // Regular code line — apply macro substitutions
+    let expanded = lines[i];
+    let hasMacro = false;
+    for (const [name, def] of Object.entries(defines)) {
+      if (def.params) {
+        // Function-like macro
+        const macroRegex = new RegExp(`\\b${name}\\(([^)]*)\\)`, "g");
+        if (macroRegex.test(expanded)) {
+          hasMacro = true;
+          expanded = expanded.replace(new RegExp(`\\b${name}\\(([^)]*)\\)`, "g"), (match, args) => {
+            let result = def.body;
+            const argVals = args.split(",").map(a => a.trim());
+            def.params.forEach((p, idx) => {
+              result = result.replace(new RegExp(`\\b${p}\\b`, "g"), argVals[idx] || p);
+            });
+            return result;
+          });
+        }
+      } else {
+        // Object-like macro
+        const macroRegex = new RegExp(`\\b${name}\\b`, "g");
+        if (macroRegex.test(expanded) && def.body) {
+          hasMacro = true;
+          expanded = expanded.replace(new RegExp(`\\b${name}\\b`, "g"), def.body);
+        }
+      }
+    }
+    
+    if (!activeCondition) {
+      outputLines.push({ num: i + 1, original: lines[i], expanded: `/* excluded by conditional */`, type: "excluded" });
+    } else {
+      outputLines.push({ num: i + 1, original: lines[i], expanded: expanded, type: hasMacro ? "macro-expanded" : "code" });
+    }
+  }
+  
+  return { includes, defines, outputLines };
+}
+
+function renderPreprocessorOutput(result) {
+  let html = buildStageHeader("preprocessor");
+  html += `<div class="pipeline-stage-body">`;
+  html += `<div class="preprocessor-output-view">`;
+  
+  // Includes section
+  if (result.includes.length > 0) {
+    html += `<div class="preproc-section">`;
+    html += `<div class="preproc-section-title">Included Headers (${result.includes.length})</div>`;
+    html += `<div class="preproc-code">`;
+    result.includes.forEach(inc => {
+      html += `<div class="preproc-line preproc-added">`;
+      html += `<span class="preproc-line-num">${inc.line}</span>`;
+      html += `<span class="preproc-line-content"><span class="preproc-directive">#include</span> <span class="preproc-include-path">${inc.type === 'system' ? '&lt;' + escapeHtml(inc.name) + '&gt;' : '"' + escapeHtml(inc.name) + '"'}</span> <span style="color:var(--text-muted);">→ ${inc.type} header</span></span>`;
+      html += `</div>`;
+    });
+    html += `</div></div>`;
+  }
+  
+  // Macros section
+  const macroEntries = Object.entries(result.defines);
+  if (macroEntries.length > 0) {
+    html += `<div class="preproc-section">`;
+    html += `<div class="preproc-section-title">Macro Definitions (${macroEntries.length})</div>`;
+    html += `<div class="preproc-code">`;
+    macroEntries.forEach(([name, def]) => {
+      html += `<div class="preproc-line">`;
+      html += `<span class="preproc-line-num">${def.line}</span>`;
+      html += `<span class="preproc-line-content"><span class="preproc-macro-highlight">${escapeHtml(name)}</span>${def.params ? '(' + def.params.join(', ') + ')' : ''} → <span style="color:var(--text-primary);">${escapeHtml(def.body || '(flag)')}</span></span>`;
+      html += `</div>`;
+    });
+    html += `</div></div>`;
+  }
+  
+  // Expanded source
+  html += `<div class="preproc-section">`;
+  html += `<div class="preproc-section-title">Expanded Source</div>`;
+  html += `<div class="preproc-code">`;
+  result.outputLines.forEach(line => {
+    const cls = line.type === "include" || line.type === "define" || line.type === "conditional" || line.type === "directive"
+      ? "preproc-removed" : (line.type === "macro-expanded" ? "preproc-added" : "");
+    html += `<div class="preproc-line ${cls}">`;
+    html += `<span class="preproc-line-num">${line.num}</span>`;
+    html += `<span class="preproc-line-content">${escapeHtml(line.expanded)}</span>`;
+    html += `</div>`;
+  });
+  html += `</div></div>`;
+  
+  html += `</div></div>`;
+  dom.preprocessorOutput.innerHTML = html;
+}
+
+// =============================================
+// STAGE 2: LEXER / TOKENIZER
+// =============================================
+const C_KEYWORDS = new Set([
+  "auto", "break", "case", "char", "const", "continue", "default", "do",
+  "double", "else", "enum", "extern", "float", "for", "goto", "if",
+  "inline", "int", "long", "register", "restrict", "return", "short", "signed",
+  "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+  "volatile", "while", "_Bool", "_Complex", "_Imaginary",
+  // C++ extras
+  "class", "namespace", "template", "typename", "public", "private", "protected",
+  "virtual", "override", "new", "delete", "this", "bool", "true", "false",
+  "nullptr", "using", "try", "catch", "throw", "operator", "friend",
+  "cout", "cin", "endl", "string", "vector", "map", "set",
+  "include", "define", "ifdef", "ifndef", "endif", "pragma",
+]);
+
+const C_TYPES = new Set([
+  "int", "char", "float", "double", "void", "long", "short", "signed", "unsigned",
+  "size_t", "ssize_t", "bool", "_Bool", "int8_t", "int16_t", "int32_t", "int64_t",
+  "uint8_t", "uint16_t", "uint32_t", "uint64_t", "FILE", "string", "vector",
+]);
+
+function tokenizeCode(code) {
+  const tokens = [];
+  let pos = 0;
+  let line = 1;
+  let col = 1;
+  
+  while (pos < code.length) {
+    const ch = code[pos];
+    
+    // Whitespace
+    if (/\s/.test(ch)) {
+      if (ch === "\n") { line++; col = 1; }
+      else { col++; }
+      pos++;
+      continue;
+    }
+    
+    // Preprocessor directive
+    if (ch === "#") {
+      let val = "#";
+      pos++; col++;
+      while (pos < code.length && /[a-zA-Z_]/.test(code[pos])) {
+        val += code[pos]; pos++; col++;
+      }
+      tokens.push({ type: "preprocessor", value: val, line, col: col - val.length });
+      continue;
+    }
+    
+    // Single-line comment
+    if (ch === "/" && code[pos + 1] === "/") {
+      let val = "//";
+      pos += 2; col += 2;
+      while (pos < code.length && code[pos] !== "\n") {
+        val += code[pos]; pos++; col++;
+      }
+      tokens.push({ type: "comment", value: val, line, col: col - val.length });
+      continue;
+    }
+    
+    // Multi-line comment
+    if (ch === "/" && code[pos + 1] === "*") {
+      let val = "/*";
+      const startLine = line;
+      const startCol = col;
+      pos += 2; col += 2;
+      while (pos < code.length && !(code[pos] === "*" && code[pos + 1] === "/")) {
+        if (code[pos] === "\n") { line++; col = 1; }
+        else { col++; }
+        val += code[pos]; pos++;
+      }
+      if (pos < code.length) { val += "*/"; pos += 2; col += 2; }
+      tokens.push({ type: "comment", value: val, line: startLine, col: startCol });
+      continue;
+    }
+    
+    // String literal
+    if (ch === '"') {
+      let val = '"';
+      const startCol = col;
+      pos++; col++;
+      while (pos < code.length && code[pos] !== '"') {
+        if (code[pos] === "\\" && pos + 1 < code.length) { val += code[pos]; pos++; col++; }
+        val += code[pos]; pos++; col++;
+      }
+      if (pos < code.length) { val += '"'; pos++; col++; }
+      tokens.push({ type: "string", value: val, line, col: startCol });
+      continue;
+    }
+    
+    // Char literal
+    if (ch === "'") {
+      let val = "'";
+      const startCol = col;
+      pos++; col++;
+      while (pos < code.length && code[pos] !== "'") {
+        if (code[pos] === "\\" && pos + 1 < code.length) { val += code[pos]; pos++; col++; }
+        val += code[pos]; pos++; col++;
+      }
+      if (pos < code.length) { val += "'"; pos++; col++; }
+      tokens.push({ type: "char", value: val, line, col: startCol });
+      continue;
+    }
+    
+    // Number
+    if (/[0-9]/.test(ch) || (ch === "." && pos + 1 < code.length && /[0-9]/.test(code[pos + 1]))) {
+      let val = "";
+      const startCol = col;
+      // Hex
+      if (ch === "0" && pos + 1 < code.length && (code[pos + 1] === "x" || code[pos + 1] === "X")) {
+        val += code[pos] + code[pos + 1]; pos += 2; col += 2;
+        while (pos < code.length && /[0-9a-fA-F]/.test(code[pos])) { val += code[pos]; pos++; col++; }
+      } else {
+        while (pos < code.length && /[0-9.]/.test(code[pos])) { val += code[pos]; pos++; col++; }
+      }
+      // Suffix (u, l, ll, f, etc.)
+      while (pos < code.length && /[uUlLfF]/.test(code[pos])) { val += code[pos]; pos++; col++; }
+      tokens.push({ type: "number", value: val, line, col: startCol });
+      continue;
+    }
+    
+    // Identifier / keyword
+    if (/[a-zA-Z_]/.test(ch)) {
+      let val = "";
+      const startCol = col;
+      while (pos < code.length && /[a-zA-Z0-9_]/.test(code[pos])) {
+        val += code[pos]; pos++; col++;
+      }
+      // Check if it's a scope resolution (std::)
+      if (pos < code.length && code[pos] === ":" && code[pos + 1] === ":") {
+        val += "::"; pos += 2; col += 2;
+        while (pos < code.length && /[a-zA-Z0-9_]/.test(code[pos])) {
+          val += code[pos]; pos++; col++;
+        }
+      }
+      let type = "identifier";
+      if (C_TYPES.has(val)) type = "type";
+      else if (C_KEYWORDS.has(val)) type = "keyword";
+      tokens.push({ type, value: val, line, col: startCol });
+      continue;
+    }
+    
+    // Multi-char operators
+    const twoChar = code.substring(pos, pos + 2);
+    const threeChar = code.substring(pos, pos + 3);
+    if (["<<=", ">>="].includes(threeChar)) {
+      tokens.push({ type: "operator", value: threeChar, line, col });
+      pos += 3; col += 3;
+      continue;
+    }
+    if (["+=", "-=", "*=", "/=", "%=", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "->", "<<", ">>", "::"].includes(twoChar)) {
+      tokens.push({ type: "operator", value: twoChar, line, col });
+      pos += 2; col += 2;
+      continue;
+    }
+    
+    // Single char operators / punctuation
+    if ("+-*/%=<>!&|^~?".includes(ch)) {
+      tokens.push({ type: "operator", value: ch, line, col });
+      pos++; col++;
+      continue;
+    }
+    
+    if ("{}()[];,.:" .includes(ch)) {
+      tokens.push({ type: "punctuation", value: ch, line, col });
+      pos++; col++;
+      continue;
+    }
+    
+    // Unknown character
+    pos++; col++;
+  }
+  
+  return tokens;
+}
+
+function renderTokenTable(tokens) {
+  // Compute stats
+  const stats = {};
+  tokens.forEach(t => { stats[t.type] = (stats[t.type] || 0) + 1; });
+  
+  let html = buildStageHeader("lexer");
+  html += `<div class="pipeline-stage-body">`;
+  
+  // Stats bar
+  html += `<div class="token-stats">`;
+  html += `<div class="token-stat"><span class="token-stat-count">${tokens.length}</span> Total Tokens</div>`;
+  for (const [type, count] of Object.entries(stats).sort((a, b) => b[1] - a[1])) {
+    html += `<div class="token-stat"><span class="tok-type-badge ${type}">${type}</span> <span class="token-stat-count">${count}</span></div>`;
+  }
+  html += `</div>`;
+  
+  // Table
+  html += `<div class="token-table-wrapper"><table class="token-table">`;
+  html += `<thead><tr><th>#</th><th>Type</th><th>Value</th><th>Line</th><th>Col</th></tr></thead>`;
+  html += `<tbody>`;
+  tokens.forEach((t, i) => {
+    html += `<tr>`;
+    html += `<td class="tok-index">${i + 1}</td>`;
+    html += `<td><span class="tok-type-badge ${t.type}">${t.type}</span></td>`;
+    html += `<td class="tok-value">${escapeHtml(t.value)}</td>`;
+    html += `<td class="tok-location">${t.line}</td>`;
+    html += `<td class="tok-location">${t.col}</td>`;
+    html += `</tr>`;
+  });
+  html += `</tbody></table></div>`;
+  html += `</div>`;
+  
+  dom.lexerOutput.innerHTML = html;
+}
+
+// =============================================
+// STAGE 3: PARSER / AST
+// =============================================
+function parseToAST(tokens, sourceCode) {
+  const ast = { type: "Program", nodeType: "program", children: [] };
+  let idx = 0;
+  
+  function peek() { return tokens[idx] || null; }
+  function advance() { return tokens[idx++]; }
+  
+  function skipUntil(predicate) {
+    while (idx < tokens.length && !predicate(tokens[idx])) { idx++; }
+  }
+  
+  function collectBalanced() {
+    // Collect tokens between { and matching }
+    let depth = 0;
+    const collected = [];
+    if (peek() && peek().value === "{") { advance(); depth = 1; }
+    while (idx < tokens.length && depth > 0) {
+      const t = advance();
+      if (t.value === "{") depth++;
+      else if (t.value === "}") { depth--; if (depth === 0) break; }
+      collected.push(t);
+    }
+    return collected;
+  }
+  
+  function parseTopLevel() {
+    while (idx < tokens.length) {
+      const t = peek();
+      if (!t) break;
+      
+      // Preprocessor directives
+      if (t.type === "preprocessor") {
+        const directive = advance();
+        const node = { type: directive.value, nodeType: "include", value: directive.value, children: [] };
+        // Collect the rest of the directive line
+        const directiveLine = directive.line;
+        while (peek() && peek().line === directiveLine) {
+          const argTok = advance();
+          node.value += " " + argTok.value;
+          node.children.push({ type: "Argument", nodeType: "literal", value: argTok.value, children: [] });
+        }
+        ast.children.push(node);
+        continue;
+      }
+      
+      // Comments
+      if (t.type === "comment") {
+        advance();
+        continue; // skip comments in AST
+      }
+      
+      // Try to parse function or global declaration
+      // Look for: type name ( ... ) { ... }
+      if (t.type === "type" || t.type === "keyword" || t.type === "identifier") {
+        const saved = idx;
+        const funcNode = tryParseFunction();
+        if (funcNode) {
+          ast.children.push(funcNode);
+          continue;
+        }
+        idx = saved;
+        
+        // Try global variable
+        const declNode = tryParseDeclaration();
+        if (declNode) {
+          ast.children.push(declNode);
+          continue;
+        }
+        idx = saved;
+      }
+      
+      // Skip unrecognized tokens
+      advance();
+    }
+  }
+  
+  function tryParseFunction() {
+    // Collect return type tokens
+    let returnType = "";
+    const start = idx;
+    
+    // Skip type qualifiers/specifiers
+    while (peek() && (peek().type === "type" || peek().type === "keyword" || peek().value === "*" || peek().value === "unsigned" || peek().value === "signed" || peek().value === "static" || peek().value === "inline" || peek().value === "const")) {
+      returnType += (returnType ? " " : "") + advance().value;
+    }
+    
+    if (!peek() || peek().type !== "identifier") return null;
+    const funcName = advance().value;
+    
+    if (!peek() || peek().value !== "(") return null;
+    advance(); // (
+    
+    // Parse parameters
+    const params = [];
+    while (peek() && peek().value !== ")") {
+      let paramType = "";
+      let paramName = "";
+      while (peek() && peek().value !== "," && peek().value !== ")") {
+        const pt = advance();
+        if (peek() && peek().value !== "," && peek().value !== ")") {
+          paramType += (paramType ? " " : "") + pt.value;
+        } else {
+          if (paramType) paramName = pt.value;
+          else paramType = pt.value;
+        }
+      }
+      if (paramType) {
+        params.push({ type: "Parameter", nodeType: "parameter", value: `${paramType}${paramName ? ' ' + paramName : ''}`, children: [] });
+      }
+      if (peek() && peek().value === ",") advance();
+    }
+    if (peek() && peek().value === ")") advance(); // )
+    
+    if (!peek() || peek().value !== "{") return null;
+    
+    const bodyTokens = collectBalanced();
+    const bodyStatements = parseStatements(bodyTokens);
+    
+    return {
+      type: "FunctionDecl",
+      nodeType: "function",
+      value: `${returnType} ${funcName}(${params.map(p => p.value).join(', ')})`,
+      children: [
+        { type: "ReturnType", nodeType: "return-type", value: returnType, children: [] },
+        ...params,
+        { type: "CompoundStmt", nodeType: "statement", value: "{ ... }", children: bodyStatements }
+      ]
+    };
+  }
+  
+  function tryParseDeclaration() {
+    let type = "";
+    while (peek() && (peek().type === "type" || peek().type === "keyword" || peek().value === "*" || peek().value === "const")) {
+      type += (type ? " " : "") + advance().value;
+    }
+    if (!type || !peek()) return null;
+    
+    if (peek().type !== "identifier") return null;
+    const name = advance().value;
+    
+    let value = "";
+    if (peek() && peek().value === "=") {
+      advance(); // =
+      while (peek() && peek().value !== ";" && peek().value !== ",") {
+        value += advance().value + " ";
+      }
+    }
+    
+    if (peek() && peek().value === ";") advance();
+    
+    return {
+      type: "VarDecl",
+      nodeType: "declaration",
+      value: `${type} ${name}${value ? ' = ' + value.trim() : ''}`,
+      children: [
+        { type: "Type", nodeType: "literal", value: type, children: [] },
+        { type: "Name", nodeType: "literal", value: name, children: [] },
+        ...(value ? [{ type: "Initializer", nodeType: "expression", value: value.trim(), children: [] }] : [])
+      ]
+    };
+  }
+  
+  function parseStatements(stmtTokens) {
+    const statements = [];
+    let si = 0;
+    
+    function sPeek() { return stmtTokens[si] || null; }
+    function sAdvance() { return stmtTokens[si++]; }
+    
+    while (si < stmtTokens.length) {
+      const t = sPeek();
+      if (!t) break;
+      
+      // Skip comments
+      if (t.type === "comment") { sAdvance(); continue; }
+      
+      // Return statement
+      if (t.value === "return") {
+        sAdvance();
+        let retVal = "";
+        while (sPeek() && sPeek().value !== ";") { retVal += sAdvance().value + " "; }
+        if (sPeek() && sPeek().value === ";") sAdvance();
+        statements.push({ type: "ReturnStmt", nodeType: "control", value: `return ${retVal.trim()}`, children: retVal.trim() ? [{ type: "Value", nodeType: "expression", value: retVal.trim(), children: [] }] : [] });
+        continue;
+      }
+      
+      // If statement
+      if (t.value === "if") {
+        sAdvance();
+        let cond = "";
+        if (sPeek() && sPeek().value === "(") {
+          sAdvance(); let depth = 1;
+          while (si < stmtTokens.length && depth > 0) {
+            const ct = sAdvance();
+            if (ct.value === "(") depth++;
+            else if (ct.value === ")") { depth--; if (depth === 0) break; }
+            cond += ct.value + " ";
+          }
+        }
+        // Body
+        let bodyChildren = [];
+        if (sPeek() && sPeek().value === "{") {
+          sAdvance(); let depth = 1;
+          const bodyToks = [];
+          while (si < stmtTokens.length && depth > 0) {
+            const bt = sAdvance();
+            if (bt.value === "{") depth++;
+            else if (bt.value === "}") { depth--; if (depth === 0) break; }
+            bodyToks.push(bt);
+          }
+          bodyChildren = parseStatements(bodyToks);
+        }
+        
+        const ifNode = { type: "IfStmt", nodeType: "control", value: `if (${cond.trim()})`, children: [{ type: "Condition", nodeType: "expression", value: cond.trim(), children: [] }, { type: "ThenBlock", nodeType: "statement", value: "{ ... }", children: bodyChildren }] };
+        
+        // else?
+        if (sPeek() && sPeek().value === "else") {
+          sAdvance();
+          let elseChildren = [];
+          if (sPeek() && sPeek().value === "{") {
+            sAdvance(); let depth = 1;
+            const elseToks = [];
+            while (si < stmtTokens.length && depth > 0) {
+              const et = sAdvance();
+              if (et.value === "{") depth++;
+              else if (et.value === "}") { depth--; if (depth === 0) break; }
+              elseToks.push(et);
+            }
+            elseChildren = parseStatements(elseToks);
+          }
+          ifNode.children.push({ type: "ElseBlock", nodeType: "statement", value: "{ ... }", children: elseChildren });
+        }
+        
+        statements.push(ifNode);
+        continue;
+      }
+      
+      // For loop
+      if (t.value === "for") {
+        sAdvance();
+        let forExpr = "";
+        if (sPeek() && sPeek().value === "(") {
+          sAdvance(); let depth = 1;
+          while (si < stmtTokens.length && depth > 0) {
+            const ft = sAdvance();
+            if (ft.value === "(") depth++;
+            else if (ft.value === ")") { depth--; if (depth === 0) break; }
+            forExpr += ft.value + " ";
+          }
+        }
+        let bodyChildren = [];
+        if (sPeek() && sPeek().value === "{") {
+          sAdvance(); let depth = 1;
+          const bodyToks = [];
+          while (si < stmtTokens.length && depth > 0) {
+            const bt = sAdvance();
+            if (bt.value === "{") depth++;
+            else if (bt.value === "}") { depth--; if (depth === 0) break; }
+            bodyToks.push(bt);
+          }
+          bodyChildren = parseStatements(bodyToks);
+        }
+        statements.push({ type: "ForStmt", nodeType: "control", value: `for (${forExpr.trim()})`, children: [{ type: "ForExpr", nodeType: "expression", value: forExpr.trim(), children: [] }, { type: "LoopBody", nodeType: "statement", value: "{ ... }", children: bodyChildren }] });
+        continue;
+      }
+      
+      // While loop
+      if (t.value === "while") {
+        sAdvance();
+        let cond = "";
+        if (sPeek() && sPeek().value === "(") {
+          sAdvance(); let depth = 1;
+          while (si < stmtTokens.length && depth > 0) {
+            const wt = sAdvance();
+            if (wt.value === "(") depth++;
+            else if (wt.value === ")") { depth--; if (depth === 0) break; }
+            cond += wt.value + " ";
+          }
+        }
+        let bodyChildren = [];
+        if (sPeek() && sPeek().value === "{") {
+          sAdvance(); let depth = 1;
+          const bodyToks = [];
+          while (si < stmtTokens.length && depth > 0) {
+            const bt = sAdvance();
+            if (bt.value === "{") depth++;
+            else if (bt.value === "}") { depth--; if (depth === 0) break; }
+            bodyToks.push(bt);
+          }
+          bodyChildren = parseStatements(bodyToks);
+        }
+        statements.push({ type: "WhileStmt", nodeType: "control", value: `while (${cond.trim()})`, children: [{ type: "Condition", nodeType: "expression", value: cond.trim(), children: [] }, { type: "LoopBody", nodeType: "statement", value: "{ ... }", children: bodyChildren }] });
+        continue;
+      }
+      
+      // Do...while
+      if (t.value === "do") {
+        sAdvance();
+        let bodyChildren = [];
+        if (sPeek() && sPeek().value === "{") {
+          sAdvance(); let depth = 1;
+          const bodyToks = [];
+          while (si < stmtTokens.length && depth > 0) {
+            const bt = sAdvance();
+            if (bt.value === "{") depth++;
+            else if (bt.value === "}") { depth--; if (depth === 0) break; }
+            bodyToks.push(bt);
+          }
+          bodyChildren = parseStatements(bodyToks);
+        }
+        let cond = "";
+        if (sPeek() && sPeek().value === "while") {
+          sAdvance();
+          if (sPeek() && sPeek().value === "(") {
+            sAdvance(); let depth = 1;
+            while (si < stmtTokens.length && depth > 0) {
+              const wt = sAdvance();
+              if (wt.value === "(") depth++;
+              else if (wt.value === ")") { depth--; if (depth === 0) break; }
+              cond += wt.value + " ";
+            }
+          }
+        }
+        if (sPeek() && sPeek().value === ";") sAdvance();
+        statements.push({ type: "DoWhileStmt", nodeType: "control", value: `do ... while (${cond.trim()})`, children: [{ type: "LoopBody", nodeType: "statement", value: "{ ... }", children: bodyChildren }, { type: "Condition", nodeType: "expression", value: cond.trim(), children: [] }] });
+        continue;
+      }
+      
+      // Switch
+      if (t.value === "switch") {
+        sAdvance();
+        let switchExpr = "";
+        if (sPeek() && sPeek().value === "(") {
+          sAdvance(); let depth = 1;
+          while (si < stmtTokens.length && depth > 0) {
+            const st = sAdvance();
+            if (st.value === "(") depth++;
+            else if (st.value === ")") { depth--; if (depth === 0) break; }
+            switchExpr += st.value + " ";
+          }
+        }
+        let bodyChildren = [];
+        if (sPeek() && sPeek().value === "{") {
+          sAdvance(); let depth = 1;
+          const bodyToks = [];
+          while (si < stmtTokens.length && depth > 0) {
+            const bt = sAdvance();
+            if (bt.value === "{") depth++;
+            else if (bt.value === "}") { depth--; if (depth === 0) break; }
+            bodyToks.push(bt);
+          }
+          bodyChildren = parseStatements(bodyToks);
+        }
+        statements.push({ type: "SwitchStmt", nodeType: "control", value: `switch (${switchExpr.trim()})`, children: bodyChildren });
+        continue;
+      }
+      
+      // Case / Default
+      if (t.value === "case") {
+        sAdvance();
+        let caseVal = "";
+        while (sPeek() && sPeek().value !== ":") { caseVal += sAdvance().value + " "; }
+        if (sPeek() && sPeek().value === ":") sAdvance();
+        statements.push({ type: "CaseLabel", nodeType: "control", value: `case ${caseVal.trim()}:`, children: [] });
+        continue;
+      }
+      if (t.value === "default") {
+        sAdvance();
+        if (sPeek() && sPeek().value === ":") sAdvance();
+        statements.push({ type: "DefaultLabel", nodeType: "control", value: "default:", children: [] });
+        continue;
+      }
+      if (t.value === "break") {
+        sAdvance();
+        if (sPeek() && sPeek().value === ";") sAdvance();
+        statements.push({ type: "BreakStmt", nodeType: "control", value: "break", children: [] });
+        continue;
+      }
+      if (t.value === "continue") {
+        sAdvance();
+        if (sPeek() && sPeek().value === ";") sAdvance();
+        statements.push({ type: "ContinueStmt", nodeType: "control", value: "continue", children: [] });
+        continue;
+      }
+      
+      // Variable declaration (type name ...;)
+      if (t.type === "type" || (t.type === "keyword" && ["const", "static", "unsigned", "signed", "struct"].includes(t.value))) {
+        let type = "";
+        const savedSi = si;
+        while (sPeek() && (sPeek().type === "type" || sPeek().type === "keyword" && ["const", "static", "unsigned", "signed", "long", "struct"].includes(sPeek().value) || sPeek().value === "*")) {
+          type += (type ? " " : "") + sAdvance().value;
+        }
+        if (sPeek() && sPeek().type === "identifier") {
+          const name = sAdvance().value;
+          // Check for function call like `int main()`
+          if (sPeek() && sPeek().value === "(") {
+            si = savedSi;
+          } else {
+            let initVal = "";
+            if (sPeek() && sPeek().value === "=") {
+              sAdvance();
+              while (sPeek() && sPeek().value !== ";" && sPeek().value !== ",") { initVal += sAdvance().value + " "; }
+            }
+            // Handle array declarations
+            if (sPeek() && sPeek().value === "[") {
+              let arrPart = "";
+              while (sPeek() && sPeek().value !== ";") { arrPart += sAdvance().value; }
+            }
+            if (sPeek() && sPeek().value === ";") sAdvance();
+            else if (sPeek() && sPeek().value === ",") sAdvance();
+            statements.push({ type: "VarDecl", nodeType: "declaration", value: `${type} ${name}${initVal ? ' = ' + initVal.trim() : ''}`, children: [] });
+            continue;
+          }
+        } else {
+          si = savedSi;
+        }
+      }
+      
+      // Generic expression statement (function calls, assignments, etc.)
+      let expr = "";
+      while (sPeek() && sPeek().value !== ";") {
+        expr += sAdvance().value + " ";
+      }
+      if (sPeek() && sPeek().value === ";") sAdvance();
+      
+      if (expr.trim()) {
+        let nodeType = "expression";
+        const trimmed = expr.trim();
+        if (trimmed.includes("printf") || trimmed.includes("cout") || trimmed.includes("puts")) nodeType = "expression";
+        if (trimmed.includes("=") && !trimmed.includes("==")) nodeType = "expression";
+        
+        // Detect function call
+        const callMatch = trimmed.match(/^([\w:]+)\s*\(/);
+        const label = callMatch ? `CallExpr: ${callMatch[1]}(...)` : `ExprStmt`;
+        
+        statements.push({ type: label, nodeType, value: trimmed, children: [] });
+      }
+    }
+    return statements;
+  }
+  
+  parseTopLevel();
+  return ast;
+}
+
+function renderASTTree(ast) {
+  let html = buildStageHeader("parser");
+  html += `<div class="pipeline-stage-body">`;
+  html += `<div class="ast-tree">`;
+  html += renderASTNode(ast, 0, true);
+  html += `</div></div>`;
+  dom.parserOutput.innerHTML = html;
+  
+  // Add toggle event listeners
+  dom.parserOutput.querySelectorAll(".ast-node-header").forEach(header => {
+    header.addEventListener("click", () => {
+      const toggle = header.querySelector(".ast-toggle");
+      const children = header.nextElementSibling;
+      if (toggle && children && children.classList.contains("ast-node-children")) {
+        toggle.classList.toggle("expanded");
+        children.classList.toggle("collapsed");
+      }
+    });
+  });
+}
+
+function renderASTNode(node, depth, expanded) {
+  const hasChildren = node.children && node.children.length > 0;
+  const toggleIcon = hasChildren ? `<span class="ast-toggle ${expanded ? 'expanded' : ''}">▶</span>` : `<span class="ast-toggle" style="visibility:hidden;">▶</span>`;
+  const typeClass = node.nodeType || "statement";
+  const displayValue = node.value ? `: ${escapeHtml(node.value.length > 80 ? node.value.substring(0, 80) + '...' : node.value)}` : "";
+  
+  let html = `<div class="ast-node">`;
+  html += `<div class="ast-node-header">`;
+  html += toggleIcon;
+  html += `<span class="ast-node-type ${typeClass}">${escapeHtml(node.type)}</span>`;
+  if (displayValue) html += `<span class="ast-node-value">${displayValue}</span>`;
+  html += `</div>`;
+  
+  if (hasChildren) {
+    const defaultExpand = depth < 3;
+    html += `<div class="ast-node-children ${defaultExpand ? '' : 'collapsed'}">`;
+    node.children.forEach(child => {
+      html += renderASTNode(child, depth + 1, defaultExpand);
+    });
+    html += `</div>`;
+  }
+  
+  html += `</div>`;
+  return html;
+}
+
+// =============================================
+// STAGE 4: SEMANTIC ANALYSIS
+// =============================================
+function analyzeSemantics(ast, sourceCode) {
+  const symbols = [];  // { name, type, scope, scopeLevel, kind, line }
+  const diagnostics = []; // { level, message }
+  const usedSymbols = new Set();
+  let scopeStack = ["global"];
+  let scopeLevel = 0;
+  
+  function walkNode(node, parentScope) {
+    if (!node) return;
+    
+    // Function declarations
+    if (node.type === "FunctionDecl") {
+      const funcMatch = node.value.match(/(\w+)\s+(\w+)\s*\(/);
+      if (funcMatch) {
+        symbols.push({ name: funcMatch[2], type: funcMatch[1], scope: "global", scopeLevel: 0, kind: "function", line: "—" });
+      }
+      
+      scopeStack.push(node.value.match(/(\w+)\s*\(/)?.[1] || "func");
+      scopeLevel++;
+      
+      // Process parameters
+      node.children.forEach(child => {
+        if (child.type === "Parameter" && child.value) {
+          const parts = child.value.trim().split(/\s+/);
+          if (parts.length >= 2) {
+            symbols.push({ name: parts[parts.length - 1], type: parts.slice(0, -1).join(" "), scope: scopeStack[scopeStack.length - 1], scopeLevel, kind: "param", line: "—" });
+          } else if (parts.length === 1 && parts[0] !== "void") {
+            symbols.push({ name: parts[0], type: "(unnamed param)", scope: scopeStack[scopeStack.length - 1], scopeLevel, kind: "param", line: "—" });
+          }
+        }
+      });
+      
+      node.children.forEach(child => walkNode(child, scopeStack[scopeStack.length - 1]));
+      scopeStack.pop();
+      scopeLevel--;
+      return;
+    }
+    
+    // Variable declarations
+    if (node.type === "VarDecl" && node.value) {
+      const declMatch = node.value.match(/^([\w\s*]+?)\s+(\w+)/);
+      if (declMatch) {
+        symbols.push({ name: declMatch[2], type: declMatch[1].trim(), scope: scopeStack[scopeStack.length - 1], scopeLevel, kind: scopeLevel === 0 ? "global" : "local", line: "—" });
+      }
+    }
+    
+    // Track used symbols
+    if (node.type && node.type.startsWith("CallExpr")) {
+      const callName = node.type.match(/CallExpr:\s*(\w+)/)?.[1];
+      if (callName) usedSymbols.add(callName);
+    }
+    if (node.value) {
+      // Simple heuristic: find identifier-like tokens in values
+      const identifiers = node.value.match(/\b[a-zA-Z_]\w*\b/g);
+      if (identifiers) identifiers.forEach(id => usedSymbols.add(id));
+    }
+    
+    // Control flow nodes
+    if (node.type === "IfStmt" || node.type === "ForStmt" || node.type === "WhileStmt" || node.type === "DoWhileStmt" || node.type === "SwitchStmt") {
+      scopeStack.push(node.type);
+      scopeLevel++;
+      node.children.forEach(child => walkNode(child, scopeStack[scopeStack.length - 1]));
+      scopeStack.pop();
+      scopeLevel--;
+      return;
+    }
+    
+    if (node.children) {
+      node.children.forEach(child => walkNode(child, parentScope));
+    }
+  }
+  
+  walkNode(ast, "global");
+  
+  // Generate diagnostics
+  const declaredNames = symbols.map(s => s.name);
+  const localVars = symbols.filter(s => s.kind === "local" || s.kind === "param");
+  
+  // Check for unused local variables (simple heuristic)
+  localVars.forEach(sym => {
+    // Count how many times this symbol appears in all node values
+    const mentions = [...usedSymbols].filter(u => u === sym.name).length;
+    // If the symbol appears exactly once (just its declaration), it might be unused
+    // This is a rough heuristic
+  });
+  
+  // Check for main function
+  const hasMain = symbols.some(s => s.name === "main" && s.kind === "function");
+  if (hasMain) {
+    diagnostics.push({ level: "success", icon: "✓", message: "Entry point 'main()' function found" });
+  } else {
+    diagnostics.push({ level: "warning", icon: "⚠", message: "No 'main()' function found — program has no entry point" });
+  }
+  
+  // Check return types
+  const funcSymbols = symbols.filter(s => s.kind === "function");
+  funcSymbols.forEach(f => {
+    if (f.type === "void") {
+      diagnostics.push({ level: "info", icon: "ℹ", message: `Function '${f.name}()' returns void` });
+    }
+  });
+  
+  // Summary diagnostic
+  diagnostics.push({ level: "info", icon: "ℹ", message: `Found ${symbols.length} symbol(s): ${funcSymbols.length} function(s), ${symbols.filter(s => s.kind === "param").length} parameter(s), ${symbols.filter(s => s.kind === "local").length} local variable(s), ${symbols.filter(s => s.kind === "global" && s.type !== undefined).length} global(s)` });
+  
+  return { symbols, diagnostics };
+}
+
+function renderSemanticOutput(semantics) {
+  let html = buildStageHeader("semantic");
+  html += `<div class="pipeline-stage-body">`;
+  
+  // Diagnostics
+  html += `<div class="semantic-section">`;
+  html += `<div class="semantic-section-title">Diagnostics</div>`;
+  html += `<ul class="diagnostic-list">`;
+  semantics.diagnostics.forEach(d => {
+    html += `<li class="diagnostic-item ${d.level}"><span class="diagnostic-icon">${d.icon}</span>${escapeHtml(d.message)}</li>`;
+  });
+  html += `</ul></div>`;
+  
+  // Symbol Table
+  if (semantics.symbols.length > 0) {
+    html += `<div class="semantic-section">`;
+    html += `<div class="semantic-section-title">Symbol Table</div>`;
+    html += `<table class="symbol-table">`;
+    html += `<thead><tr><th>Name</th><th>Type</th><th>Kind</th><th>Scope</th><th>Level</th></tr></thead>`;
+    html += `<tbody>`;
+    semantics.symbols.forEach(sym => {
+      const scopeCls = sym.kind === "param" ? "param" : (sym.scopeLevel === 0 ? "global" : "local");
+      html += `<tr>`;
+      html += `<td style="font-weight:600;">${escapeHtml(sym.name)}</td>`;
+      html += `<td><span style="color:#FFCB6B;">${escapeHtml(sym.type)}</span></td>`;
+      html += `<td><span class="scope-badge ${scopeCls}">${sym.kind}</span></td>`;
+      html += `<td>${escapeHtml(sym.scope)}</td>`;
+      html += `<td>${sym.scopeLevel}</td>`;
+      html += `</tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  
+  html += `</div>`;
+  dom.semanticOutput.innerHTML = html;
+}
+
+// =============================================
+// STAGE 5: IR / ASSEMBLY GENERATION
+// =============================================
+function generateIR(ast) {
+  const tac = [];  // Three-address code instructions
+  const asm = [];  // Pseudo-assembly instructions
+  let tempCounter = 0;
+  let labelCounter = 0;
+  
+  function newTemp() { return `t${tempCounter++}`; }
+  function newLabel() { return `L${labelCounter++}`; }
+  
+  function emitTAC(op, result, arg1, arg2, comment) {
+    tac.push({ op, result, arg1, arg2, comment });
+  }
+  
+  function emitASM(instruction, comment) {
+    asm.push({ instruction, comment });
+  }
+  
+  function processNode(node) {
+    if (!node) return;
+    
+    switch (node.type) {
+      case "Program":
+        emitTAC("PROGRAM", "start", "", "", "Program entry");
+        emitASM(".section .text", "Code section");
+        emitASM(".global _start", "Global entry point");
+        node.children.forEach(child => processNode(child));
+        break;
+        
+      case "FunctionDecl": {
+        const funcMatch = node.value.match(/(\w+)\s+(\w+)\s*\(([^)]*)\)/);
+        const funcName = funcMatch ? funcMatch[2] : "unknown";
+        const funcLabel = newLabel();
+        emitTAC("FUNC_BEGIN", funcName, "", "", `Function ${funcName} starts`);
+        emitASM("", "");
+        emitASM(`${funcName}:`, `Function: ${funcName}`);
+        emitASM("  push rbp", "Save base pointer");
+        emitASM("  mov rbp, rsp", "Set up stack frame");
+        
+        // Process parameters
+        const paramRegs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+        let paramIdx = 0;
+        node.children.forEach(child => {
+          if (child.type === "Parameter" && child.value && child.value !== "void") {
+            const parts = child.value.trim().split(/\s+/);
+            const paramName = parts[parts.length - 1];
+            emitTAC("PARAM", paramName, paramRegs[paramIdx] || "stack", "", `Parameter ${paramName}`);
+            emitASM(`  mov [rbp-${(paramIdx + 1) * 8}], ${paramRegs[paramIdx] || 'stack'}`, `Store param '${paramName}'`);
+            paramIdx++;
+          }
+        });
+        
+        // Process body
+        node.children.forEach(child => {
+          if (child.type === "CompoundStmt") {
+            child.children.forEach(stmt => processNode(stmt));
+          }
+        });
+        
+        emitTAC("FUNC_END", funcName, "", "", `Function ${funcName} ends`);
+        emitASM("  leave", "Restore stack frame");
+        emitASM("  ret", "Return to caller");
+        break;
+      }
+      
+      case "VarDecl": {
+        const parts = node.value.split("=");
+        const varName = parts[0].trim().split(/\s+/).pop();
+        const initVal = parts[1] ? parts[1].trim() : "0";
+        const temp = newTemp();
+        emitTAC("ASSIGN", varName, initVal, "", `Initialize ${varName}`);
+        emitASM(`  mov eax, ${initVal}`, `Load value ${initVal}`);
+        emitASM(`  mov [rbp-${(tempCounter) * 4}], eax`, `Store to ${varName}`);
+        break;
+      }
+      
+      case "ReturnStmt": {
+        const retVal = node.value.replace("return", "").trim();
+        emitTAC("RETURN", retVal || "0", "", "", "Return from function");
+        emitASM(`  mov eax, ${retVal || '0'}`, `Return value: ${retVal || '0'}`);
+        break;
+      }
+      
+      case "IfStmt": {
+        const cond = node.children.find(c => c.type === "Condition");
+        const labelTrue = newLabel();
+        const labelFalse = newLabel();
+        const labelEnd = newLabel();
+        
+        emitTAC("IF", cond?.value || "condition", labelTrue, labelFalse, "Conditional branch");
+        emitASM(`  cmp eax, 0`, `Evaluate: ${cond?.value || '?'}`);
+        emitASM(`  je ${labelFalse}`, `Jump if false`);
+        
+        emitTAC("LABEL", labelTrue, "", "", "Then block");
+        emitASM(`${labelTrue}:`, "Then block");
+        const thenBlock = node.children.find(c => c.type === "ThenBlock");
+        if (thenBlock) thenBlock.children.forEach(s => processNode(s));
+        emitASM(`  jmp ${labelEnd}`, "Skip else block");
+        
+        const elseBlock = node.children.find(c => c.type === "ElseBlock");
+        emitTAC("LABEL", labelFalse, "", "", "Else block");
+        emitASM(`${labelFalse}:`, "Else block");
+        if (elseBlock) elseBlock.children.forEach(s => processNode(s));
+        
+        emitTAC("LABEL", labelEnd, "", "", "End of if");
+        emitASM(`${labelEnd}:`, "End of if-else");
+        break;
+      }
+      
+      case "ForStmt": {
+        const labelStart = newLabel();
+        const labelBody = newLabel();
+        const labelEnd = newLabel();
+        const forExpr = node.children.find(c => c.type === "ForExpr");
+        
+        emitTAC("FOR_INIT", forExpr?.value || "", "", "", "For loop init");
+        emitASM("", "");
+        emitASM(`  ; for (${forExpr?.value || '...'})`, "For loop");
+        
+        emitTAC("LABEL", labelStart, "", "", "Loop condition check");
+        emitASM(`${labelStart}:`, "Loop start");
+        emitASM(`  cmp ecx, limit`, "Check loop condition");
+        emitASM(`  jge ${labelEnd}`, "Exit if done");
+        
+        const loopBody = node.children.find(c => c.type === "LoopBody");
+        if (loopBody) loopBody.children.forEach(s => processNode(s));
+        
+        emitTAC("GOTO", labelStart, "", "", "Loop back");
+        emitASM(`  inc ecx`, "Increment counter");
+        emitASM(`  jmp ${labelStart}`, "Loop back");
+        emitTAC("LABEL", labelEnd, "", "", "End of for loop");
+        emitASM(`${labelEnd}:`, "End of for");
+        break;
+      }
+      
+      case "WhileStmt": {
+        const labelStart = newLabel();
+        const labelEnd = newLabel();
+        const cond = node.children.find(c => c.type === "Condition");
+        
+        emitTAC("LABEL", labelStart, "", "", "While condition");
+        emitASM(`${labelStart}:`, "While loop start");
+        emitTAC("IF_FALSE", cond?.value || "cond", labelEnd, "", "Check while condition");
+        emitASM(`  cmp eax, 0`, `Evaluate: ${cond?.value || '?'}`);
+        emitASM(`  je ${labelEnd}`, "Exit loop if false");
+        
+        const loopBody = node.children.find(c => c.type === "LoopBody");
+        if (loopBody) loopBody.children.forEach(s => processNode(s));
+        
+        emitTAC("GOTO", labelStart, "", "", "Loop back");
+        emitASM(`  jmp ${labelStart}`, "Loop back");
+        emitTAC("LABEL", labelEnd, "", "", "End of while");
+        emitASM(`${labelEnd}:`, "End of while");
+        break;
+      }
+      
+      default: {
+        // Generic expression / call
+        if (node.value && node.type.startsWith("CallExpr")) {
+          const callName = node.type.match(/CallExpr:\s*(\w+)/)?.[1] || "func";
+          emitTAC("CALL", callName, node.value, "", `Call function ${callName}`);
+          emitASM(`  ; ${node.value}`, "");
+          emitASM(`  call ${callName}`, `Call ${callName}`);
+        } else if (node.value && node.type === "ExprStmt") {
+          emitTAC("EXPR", node.value, "", "", "Expression");
+          emitASM(`  ; ${node.value}`, "Expression statement");
+        }
+        
+        if (node.children) {
+          node.children.forEach(child => processNode(child));
+        }
+        break;
+      }
+    }
+  }
+  
+  processNode(ast);
+  return { tac, asm };
+}
+
+function renderIROutput(ir) {
+  let html = buildStageHeader("ircode");
+  html += `<div class="pipeline-stage-body"><div class="ir-output-view">`;
+  
+  // Three-Address Code
+  html += `<div class="ir-section">`;
+  html += `<div class="ir-section-title">Three-Address Code (TAC)</div>`;
+  html += `<div class="ir-code-block">`;
+  ir.tac.forEach((instr, i) => {
+    let lineHtml = "";
+    if (instr.op === "LABEL") {
+      lineHtml = `<span class="ir-label">${escapeHtml(instr.result)}:</span>`;
+    } else if (instr.op === "FUNC_BEGIN" || instr.op === "FUNC_END") {
+      lineHtml = `<span class="ir-keyword">${escapeHtml(instr.op)}</span> <span class="ir-label">${escapeHtml(instr.result)}</span>`;
+    } else if (instr.op === "ASSIGN") {
+      lineHtml = `<span class="ir-register">${escapeHtml(instr.result)}</span> <span class="ir-op">:=</span> ${escapeHtml(instr.arg1)}`;
+    } else if (instr.op === "IF" || instr.op === "IF_FALSE") {
+      lineHtml = `<span class="ir-keyword">${escapeHtml(instr.op)}</span> ${escapeHtml(instr.result)} <span class="ir-keyword">GOTO</span> <span class="ir-label">${escapeHtml(instr.arg1)}</span>${instr.arg2 ? ` <span class="ir-keyword">ELSE</span> <span class="ir-label">${escapeHtml(instr.arg2)}</span>` : ''}`;
+    } else if (instr.op === "GOTO") {
+      lineHtml = `<span class="ir-keyword">GOTO</span> <span class="ir-label">${escapeHtml(instr.result)}</span>`;
+    } else if (instr.op === "RETURN") {
+      lineHtml = `<span class="ir-keyword">RETURN</span> <span class="ir-immediate">${escapeHtml(instr.result)}</span>`;
+    } else if (instr.op === "CALL") {
+      lineHtml = `<span class="ir-keyword">CALL</span> <span class="ir-label">${escapeHtml(instr.result)}</span>`;
+    } else if (instr.op === "PARAM") {
+      lineHtml = `<span class="ir-keyword">PARAM</span> <span class="ir-register">${escapeHtml(instr.result)}</span> <span class="ir-op">=</span> ${escapeHtml(instr.arg1)}`;
+    } else {
+      lineHtml = `<span class="ir-keyword">${escapeHtml(instr.op)}</span> ${escapeHtml(instr.result)} ${escapeHtml(instr.arg1 || '')} ${escapeHtml(instr.arg2 || '')}`;
+    }
+    
+    html += `<div class="ir-line">`;
+    html += `<span class="ir-line-num">${i + 1}</span>`;
+    html += `<span class="ir-instruction">${lineHtml}</span>`;
+    if (instr.comment) html += ` <span class="ir-comment">; ${escapeHtml(instr.comment)}</span>`;
+    html += `</div>`;
+  });
+  html += `</div></div>`;
+  
+  // Pseudo-Assembly
+  html += `<div class="ir-section">`;
+  html += `<div class="ir-section-title">Pseudo-Assembly (x86-64 style)</div>`;
+  html += `<div class="ir-code-block">`;
+  let asmLine = 1;
+  ir.asm.forEach((instr) => {
+    if (!instr.instruction && !instr.comment) {
+      html += `<div class="ir-line"><span class="ir-line-num"></span><span class="ir-instruction"></span></div>`;
+      return;
+    }
+    
+    let instrHtml = escapeHtml(instr.instruction);
+    // Highlight labels
+    instrHtml = instrHtml.replace(/^(\w+:)/, '<span class="ir-label">$1</span>');
+    // Highlight instructions
+    instrHtml = instrHtml.replace(/\b(mov|push|pop|call|ret|leave|cmp|jmp|je|jne|jge|jle|jg|jl|inc|dec|add|sub|mul|div|xor|and|or|test|lea|nop)\b/g, '<span class="ir-keyword">$1</span>');
+    // Highlight registers
+    instrHtml = instrHtml.replace(/\b(eax|ebx|ecx|edx|esi|edi|rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15)\b/g, '<span class="ir-register">$1</span>');
+    // Highlight immediates
+    instrHtml = instrHtml.replace(/\b(\d+)\b/g, '<span class="ir-immediate">$1</span>');
+    
+    html += `<div class="ir-line">`;
+    html += `<span class="ir-line-num">${asmLine++}</span>`;
+    html += `<span class="ir-instruction">${instrHtml}</span>`;
+    if (instr.comment) html += ` <span class="ir-comment">; ${escapeHtml(instr.comment)}</span>`;
+    html += `</div>`;
+  });
+  html += `</div></div>`;
+  
+  html += `</div></div>`;
+  dom.ircodeOutput.innerHTML = html;
+}
+
+// =============================================
+// STAGE 6: BINARY / HEX VIEWER
+// =============================================
+const WASM_SECTION_NAMES = {
+  0: "Custom", 1: "Type", 2: "Import", 3: "Function", 4: "Table",
+  5: "Memory", 6: "Global", 7: "Export", 8: "Start", 9: "Element",
+  10: "Code", 11: "Data", 12: "DataCount"
+};
+
+function renderBinaryViewer(binary) {
+  if (!binary) {
+    dom.binaryOutput.innerHTML = buildStageHeader("binary") + `<div class="pipeline-stage-body"><div class="tab-placeholder"><span class="placeholder-icon">💾</span>Compile your code to see the binary output — hex dump of the WebAssembly binary with section annotations.</div></div>`;
+    return;
+  }
+  
+  const bytes = new Uint8Array(binary);
+  const totalBytes = bytes.length;
+  
+  let html = buildStageHeader("binary");
+  html += `<div class="pipeline-stage-body"><div class="hex-viewer">`;
+  
+  // Stats
+  html += `<div class="hex-stats">`;
+  html += `<div class="hex-stat">Size: <span class="hex-stat-value">${totalBytes.toLocaleString()} bytes</span></div>`;
+  html += `<div class="hex-stat">Format: <span class="hex-stat-value">WebAssembly (WASM)</span></div>`;
+  
+  // Check magic number
+  const isWasm = bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6D;
+  if (isWasm) {
+    const version = bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24);
+    html += `<div class="hex-stat">Version: <span class="hex-stat-value">${version}</span></div>`;
+  }
+  html += `</div>`;
+  
+  // Parse WASM sections for annotations
+  const sections = [];
+  if (isWasm) {
+    let offset = 8; // Skip magic + version
+    while (offset < totalBytes) {
+      const sectionId = bytes[offset];
+      offset++;
+      // Read LEB128 size
+      let size = 0;
+      let shift = 0;
+      let byte;
+      do {
+        if (offset >= totalBytes) break;
+        byte = bytes[offset++];
+        size |= (byte & 0x7F) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+      
+      sections.push({
+        id: sectionId,
+        name: WASM_SECTION_NAMES[sectionId] || `Unknown(${sectionId})`,
+        offset: offset,
+        size: size
+      });
+      offset += size;
+    }
+  }
+  
+  // Section summary
+  if (sections.length > 0) {
+    html += `<div class="hex-section-label"><span class="section-id">§</span> WASM Sections (${sections.length})</div>`;
+    sections.forEach(s => {
+      html += `<div style="font-size:11px;color:var(--text-secondary);padding:2px 12px;font-family:var(--font-ui);">`;
+      html += `<span class="section-id" style="margin-right:6px;">${s.id}</span>`;
+      html += `<span style="color:var(--accent-secondary);font-weight:600;">${s.name}</span>`;
+      html += ` — ${s.size.toLocaleString()} bytes at offset 0x${s.offset.toString(16).padStart(4, '0')}`;
+      html += `</div>`;
+    });
+  }
+  
+  // Hex dump (limit to first 2048 bytes for performance)
+  const displayLimit = Math.min(totalBytes, 2048);
+  html += `<div style="margin-top:12px;">`;
+  
+  // Header annotation for magic number
+  if (isWasm) {
+    html += `<div class="hex-section-label"><span class="section-id">✦</span> WASM Magic Number + Version (8 bytes)</div>`;
+  }
+  
+  for (let offset = 0; offset < displayLimit; offset += 16) {
+    // Check if we're entering a new section
+    const enteringSection = sections.find(s => s.offset >= offset && s.offset < offset + 16);
+    if (enteringSection && offset > 0) {
+      html += `<div class="hex-section-label"><span class="section-id">${enteringSection.id}</span> Section: ${enteringSection.name} (${enteringSection.size.toLocaleString()} bytes)</div>`;
+    }
+    
+    html += `<div class="hex-row">`;
+    html += `<span class="hex-offset">${offset.toString(16).padStart(8, '0')}</span>`;
+    
+    // Hex bytes
+    html += `<span class="hex-bytes">`;
+    for (let j = 0; j < 16; j++) {
+      if (j === 8) html += `<span class="hex-byte-spacer"></span>`;
+      if (offset + j < totalBytes) {
+        const b = bytes[offset + j];
+        let cls = "hex-byte";
+        if (b === 0) cls += " zero";
+        if (offset + j < 8) cls += " header"; // magic + version
+        const inSection = sections.find(s => offset + j >= s.offset && offset + j < s.offset + s.size);
+        if (inSection && offset + j >= 8) cls += " section-byte";
+        html += `<span class="${cls}">${b.toString(16).padStart(2, '0')}</span>`;
+      } else {
+        html += `<span class="hex-byte">  </span>`;
+      }
+    }
+    html += `</span>`;
+    
+    // ASCII
+    html += `<span class="hex-ascii">`;
+    for (let j = 0; j < 16; j++) {
+      if (offset + j < totalBytes) {
+        const b = bytes[offset + j];
+        if (b >= 32 && b <= 126) {
+          html += `<span class="printable">${escapeHtml(String.fromCharCode(b))}</span>`;
+        } else {
+          html += `<span class="non-printable">.</span>`;
+        }
+      }
+    }
+    html += `</span></div>`;
+  }
+  
+  if (totalBytes > displayLimit) {
+    html += `<div style="padding:12px;text-align:center;color:var(--text-muted);font-family:var(--font-ui);font-size:12px;">Showing first ${displayLimit.toLocaleString()} of ${totalBytes.toLocaleString()} bytes...</div>`;
+  }
+  
+  html += `</div></div></div>`;
+  dom.binaryOutput.innerHTML = html;
 }
